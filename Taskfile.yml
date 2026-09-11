@@ -22,6 +22,16 @@ tasks:
       - task: build
       - docker run --rm --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
 
+  test:
+    desc: Run Go cache tests
+    cmds:
+      - go test ./internal/...
+
+  test:race:
+    desc: Run Go cache tests with the race detector
+    cmds:
+      - go test -race ./internal/...
+
   mod:tidy:
     desc: Synchronize go.mod and go.sum with the source code
     cmds:
