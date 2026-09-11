@@ -40,7 +40,7 @@ func TestMemoryCacheMemoryFootprint(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			baseline := collectMemoryBenchSnapshot()
+			baseline := collectReleasedMemoryBenchSnapshot()
 			cache := newMemoryBenchCache(t)
 			entryCount := int(memoryBenchTargetBytes / int64(tc.payloadSize))
 			payloadBytes := int64(entryCount * tc.payloadSize)
@@ -98,6 +98,18 @@ func TestMemoryCacheMemoryFootprint(t *testing.T) {
 				formatRSSDelta(afterFlush, baseline),
 			)
 
+			afterRelease := collectReleasedMemoryBenchSnapshot()
+			t.Logf(
+				"after_release payload=%s entries=%d accounted=%.2fMiB heap_alloc_delta=%.2fMiB heap_inuse_delta=%.2fMiB heap_sys_delta=%.2fMiB rss_delta=%s",
+				tc.name,
+				memoryBenchEntryCount(cache),
+				bytesToMiB(cache.current.Load()),
+				bytesDeltaToMiB(afterRelease.heapAlloc, baseline.heapAlloc),
+				bytesDeltaToMiB(afterRelease.heapInuse, baseline.heapInuse),
+				bytesDeltaToMiB(afterRelease.heapSys, baseline.heapSys),
+				formatRSSDelta(afterRelease, baseline),
+			)
+
 			runtime.KeepAlive(cache)
 		})
 	}
@@ -109,7 +121,7 @@ func TestMemoryCacheMemoryRetentionCycles(t *testing.T) {
 	const payloadSize = 1 << 10
 	entryCount := int(memoryBenchTargetBytes / payloadSize)
 	cache := newMemoryBenchCache(t)
-	baseline := collectMemoryBenchSnapshot()
+	baseline := collectReleasedMemoryBenchSnapshot()
 
 	for cycle := 1; cycle <= memoryBenchCycles; cycle++ {
 		for i := 0; i < entryCount; i++ {
@@ -156,6 +168,17 @@ func TestMemoryCacheMemoryRetentionCycles(t *testing.T) {
 			formatRSSDelta(afterFlush, baseline),
 		)
 	}
+
+	afterRelease := collectReleasedMemoryBenchSnapshot()
+	t.Logf(
+		"cycle=final state=after_release entries=%d accounted=%.2fMiB heap_alloc_delta=%.2fMiB heap_inuse_delta=%.2fMiB heap_sys_delta=%.2fMiB rss_delta=%s",
+		memoryBenchEntryCount(cache),
+		bytesToMiB(cache.current.Load()),
+		bytesDeltaToMiB(afterRelease.heapAlloc, baseline.heapAlloc),
+		bytesDeltaToMiB(afterRelease.heapInuse, baseline.heapInuse),
+		bytesDeltaToMiB(afterRelease.heapSys, baseline.heapSys),
+		formatRSSDelta(afterRelease, baseline),
+	)
 
 	runtime.KeepAlive(cache)
 }
@@ -210,8 +233,16 @@ func memoryBenchEntryCount(cache *MemoryCache) int {
 
 func collectMemoryBenchSnapshot() memoryBenchSnapshot {
 	runtime.GC()
-	debug.FreeOSMemory()
+	return readMemoryBenchSnapshot()
+}
 
+func collectReleasedMemoryBenchSnapshot() memoryBenchSnapshot {
+	runtime.GC()
+	debug.FreeOSMemory()
+	return readMemoryBenchSnapshot()
+}
+
+func readMemoryBenchSnapshot() memoryBenchSnapshot {
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
 	rss, rssOK := readProcessRSSBytes()
