@@ -24,25 +24,27 @@ PHP / FrankenPHP workers
 
 ## Сборка
 
-Для локальной сборки нужен Docker:
+Для локальной разработки нужны Docker и [Task](https://taskfile.dev/).
+
+Собрать FrankenPHP с расширением:
 
 ```bash
-docker build -t frankenphp-tiered-cache:dev .
+task build
 ```
 
-Или через Makefile:
+Собрать image и проверить загрузку расширения:
 
 ```bash
-make build
+task smoke
 ```
 
-Dockerfile собирает FrankenPHP с этим модулем через `xcaddy`. Во время сборки автоматически запускается smoke-test, который проверяет, что PHP видит расширение `franken_tiered` и его версию.
+Успешная проверка выводит:
 
-Для вывода полного лога smoke-test:
-
-```bash
-make smoke
+```text
+franken_tiered smoke test passed (0.0.0-dev).
 ```
+
+Dockerfile собирает FrankenPHP через `xcaddy` и подключает этот модуль непосредственно в бинарник. Smoke-test запускается отдельно после сборки, поэтому его результат не нужно искать в Docker build log.
 
 Интеграция с Laravel будет разрабатываться отдельно и не является частью этого репозитория.
 

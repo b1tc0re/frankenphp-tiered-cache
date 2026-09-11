@@ -22,7 +22,4 @@ RUN CGO_ENABLED=1 \
 FROM dunglas/frankenphp:${FRANKENPHP_VERSION}-php8.4-bookworm
 
 COPY --from=builder /usr/local/bin/frankenphp /usr/local/bin/frankenphp
-COPY tests/smoke.php /tmp/frankenphp-tiered-cache-smoke.php
-
-RUN frankenphp php-cli /tmp/frankenphp-tiered-cache-smoke.php \
-    && rm /tmp/frankenphp-tiered-cache-smoke.php
+COPY tests /opt/frankenphp-tiered-cache/tests
