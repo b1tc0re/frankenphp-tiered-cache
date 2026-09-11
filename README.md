@@ -24,7 +24,25 @@ PHP / FrankenPHP workers
 
 ## Сборка
 
-Инструкция по сборке через FrankenPHP/xcaddy будет добавлена вместе с первой рабочей версией расширения.
+Для локальной сборки нужен Docker:
+
+```bash
+docker build -t frankenphp-tiered-cache:dev .
+```
+
+Или через Makefile:
+
+```bash
+make build
+```
+
+Dockerfile собирает FrankenPHP с этим модулем через `xcaddy`. Во время сборки автоматически запускается smoke-test, который проверяет, что PHP видит расширение `franken_tiered` и его версию.
+
+Для вывода полного лога smoke-test:
+
+```bash
+make smoke
+```
 
 Интеграция с Laravel будет разрабатываться отдельно и не является частью этого репозитория.
 
