@@ -1,0 +1,43 @@
+version: '3'
+
+vars:
+  IMAGE: '{{default "frankenphp-tiered-cache:dev" .IMAGE}}'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build FrankenPHP with the extension
+    cmds:
+      - docker build --quiet --tag '{{.IMAGE}}' . >/dev/null
+      - echo 'Built {{.IMAGE}}'
+
+  smoke:
+    desc: Build the image and run the extension smoke test
+    cmds:
+      - task: build
+      - docker run --rm --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
+
+  mod:tidy:
+    desc: Synchronize go.mod and go.sum with the source code
+    cmds:
+      - go mod tidy
+
+  mod:check:
+    desc: Check that go.mod and go.sum are tidy
+    cmds:
+      - go mod tidy -diff
+
+  mod:verify:
+    desc: Verify downloaded module contents against go.sum
+    cmds:
+      - go mod verify
+
+  clean:
+    desc: Remove the local development image
+    cmds:
+      - docker image rm -f '{{.IMAGE}}' >/dev/null 2>&1 || true
