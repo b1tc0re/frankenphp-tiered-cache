@@ -66,9 +66,9 @@ func newMemoryCache(config MemoryConfig, shardCount, lruSamples int) (*MemoryCac
 	}, nil
 }
 
-// Get returns the cached value without copying it. The returned bytes are
-// read-only and must not be modified by the caller.
-func (c *MemoryCache) Get(key string) ([]byte, bool, error) {
+// Get returns the cached value without copying it. A nil value with a nil error
+// means cache miss. Returned bytes are read-only and must not be modified.
+func (c *MemoryCache) Get(key string) ([]byte, error) {
 	shard := c.shardFor(key)
 	now := c.now().UnixNano()
 
@@ -76,51 +76,67 @@ func (c *MemoryCache) Get(key string) ([]byte, bool, error) {
 	entry, ok := shard.entries[key]
 	if !ok {
 		shard.mu.RUnlock()
-		return nil, false, nil
+		return nil, nil
 	}
 	if entry.expiresAt > 0 && entry.expiresAt <= now {
 		shard.mu.RUnlock()
 		c.deleteExpired(shard, key, entry, now)
-		return nil, false, nil
+		return nil, nil
 	}
 
 	entry.lastAccess.Store(now)
 	value := entry.value
 	shard.mu.RUnlock()
 
-	return value, true, nil
+	return value, nil
 }
 
-// Set stores value without copying it. The caller transfers read-only ownership
-// of the byte slice to the cache for as long as the entry remains reachable.
-func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) error {
+// Set stores value with expiration without copying it. The caller transfers
+// read-only ownership of value to the cache while the entry remains reachable.
+func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
-		return ErrInvalidTTL
+		return false, ErrInvalidTTL
+	}
+	if value == nil {
+		return false, ErrNilValue
 	}
 
-	return c.set(key, value, c.now().Add(ttl).UnixNano())
+	return c.set(key, value, c.now().Add(ttl).UnixNano()), nil
 }
 
 // Forever stores value without expiration and without copying it.
-func (c *MemoryCache) Forever(key string, value []byte) error {
-	return c.set(key, value, 0)
+func (c *MemoryCache) Forever(key string, value []byte) (bool, error) {
+	if value == nil {
+		return false, ErrNilValue
+	}
+
+	return c.set(key, value, 0), nil
 }
 
-func (c *MemoryCache) Forget(key string) error {
+// Forget removes a live key. It returns false when the key is missing or has expired.
+func (c *MemoryCache) Forget(key string) (bool, error) {
 	shard := c.shardFor(key)
+	now := c.now().UnixNano()
+
 	shard.mu.Lock()
-	if entry, ok := shard.entries[key]; ok {
-		delete(shard.entries, key)
-		c.current.Add(-entry.cost)
+	entry, ok := shard.entries[key]
+	if !ok {
+		shard.mu.Unlock()
+		return false, nil
 	}
+
+	delete(shard.entries, key)
+	c.current.Add(-entry.cost)
+	expired := entry.expiresAt > 0 && entry.expiresAt <= now
 	shard.mu.Unlock()
 
-	return nil
+	return !expired, nil
 }
 
-func (c *MemoryCache) Touch(key string, ttl time.Duration) error {
+// Touch updates the TTL of a live key. It returns false when the key is missing or expired.
+func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
-		return ErrInvalidTTL
+		return false, ErrInvalidTTL
 	}
 
 	now := c.now()
@@ -128,23 +144,49 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) error {
 	expiresAt := now.Add(ttl).UnixNano()
 
 	shard.mu.Lock()
-	if entry, ok := shard.entries[key]; ok {
-		if entry.expiresAt > 0 && entry.expiresAt <= now.UnixNano() {
-			delete(shard.entries, key)
-			c.current.Add(-entry.cost)
-		} else {
-			entry.expiresAt = expiresAt
-		}
+	entry, ok := shard.entries[key]
+	if !ok {
+		shard.mu.Unlock()
+		return false, nil
 	}
+	if entry.expiresAt > 0 && entry.expiresAt <= now.UnixNano() {
+		delete(shard.entries, key)
+		c.current.Add(-entry.cost)
+		shard.mu.Unlock()
+		return false, nil
+	}
+
+	entry.expiresAt = expiresAt
 	shard.mu.Unlock()
 
-	return nil
+	return true, nil
 }
 
-func (c *MemoryCache) set(key string, value []byte, expiresAt int64) error {
+// Flush removes every entry from this MemoryCache instance.
+func (c *MemoryCache) Flush() (bool, error) {
+	c.evictionMu.Lock()
+	defer c.evictionMu.Unlock()
+
+	for i := range c.shards {
+		c.shards[i].mu.Lock()
+	}
+
+	for i := range c.shards {
+		clear(c.shards[i].entries)
+	}
+	c.current.Store(0)
+
+	for i := len(c.shards) - 1; i >= 0; i-- {
+		c.shards[i].mu.Unlock()
+	}
+
+	return true, nil
+}
+
+func (c *MemoryCache) set(key string, value []byte, expiresAt int64) bool {
 	cost := itemCost(key, value)
 	if int64(cap(value)) > c.maxItemSize || cost > c.maxMemory {
-		return ErrItemTooLarge
+		return false
 	}
 
 	shard := c.shardFor(key)
@@ -172,12 +214,12 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) error {
 				c.current.Add(delta)
 			}
 			shard.mu.Unlock()
-			return nil
+			return true
 		}
 		shard.mu.Unlock()
 
-		if err := c.evictFor(delta); err != nil {
-			return err
+		if !c.evictFor(delta) {
+			return false
 		}
 	}
 }
@@ -198,12 +240,12 @@ func (c *MemoryCache) tryReserve(bytes int64) bool {
 	}
 }
 
-func (c *MemoryCache) evictFor(required int64) error {
+func (c *MemoryCache) evictFor(required int64) bool {
 	c.evictionMu.Lock()
 	defer c.evictionMu.Unlock()
 
 	if required <= 0 || c.current.Load()+required <= c.maxMemory {
-		return nil
+		return true
 	}
 
 	now := c.now().UnixNano()
@@ -224,11 +266,7 @@ func (c *MemoryCache) evictFor(required int64) error {
 		}
 	}
 
-	if c.current.Load()+required > c.maxMemory {
-		return ErrCacheFull
-	}
-
-	return nil
+	return c.current.Load()+required <= c.maxMemory
 }
 
 func (c *MemoryCache) purgeExpired(now int64) {
@@ -282,8 +320,6 @@ func (c *MemoryCache) evictOneLRU() bool {
 	}
 
 	if oldest == nil {
-		// Sparse caches can miss all random shards. Fall back to the first
-		// available entry so eviction can always make progress.
 		for i := range c.shards {
 			shard := &c.shards[i]
 			shard.mu.RLock()
