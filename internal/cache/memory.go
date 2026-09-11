@@ -61,132 +61,280 @@ func newMemoryCache(config MemoryConfig, shardCount, lruSamples int) (*MemoryCac
 		hashSeed:    maphash.MakeSeed(),
 		maxMemory:   cfg.MaxMemoryBytes,
 		maxItemSize: cfg.MaxItemSizeBytes,
-	\TØ[\\ÎˆTØ[\\Ë‚B[›ÝÎˆ[YK“›ÝË‚_Kš[ŸB‚‹ËÈÙ]™]\›œÈHØXÚY˜[YHÚ]Ý]ÛÜZ[™È]ˆH™]\›™Yž]\È\™B‹ËÈ™XY[Û›H[™]\Ý›Ý™H[ÙYšYYžHHØ[\‹‚™[˜È
-È
-“Y[[ÜžPØXÚJHÙ]
-Ù^HÝš[™ÊH
-×Xž]K›ÛÛ\œ›ÜŠHÂ‚\Ú\™HËœÚ\™›ÜŠÙ^JB‚[›ÝÈHË››ÝÊ
-K•[š^˜[›Ê
-B‚‚\Ú\™›]K”“ØÚÊ
-B‚Y[žKÚÈHÚ\™™[šY\ÖÚÙ^WB‚ZYˆ[ÚÈÂ‚B\Ú\™›]K”•[›ØÚÊ
-B‚B\™]\›ˆš[˜[ÙKš[‚_B‚ZYˆ[žK™^\™\Ð]ˆ	‰ˆ[žK™^\™\Ð]H›ÝÈÂ‚B\Ú\™›]K”•[›ØÚÊ
-B‚BXË™[]Q^\™Y
-Ú\™Ù^K[žK›ÝÊB‚B\™]\›ˆš[˜[ÙKš[‚_B‚‚Y[žK›\ÝXØÙ\ÜË”ÝÜ™J›ÝÊB‚]˜[YHH[žK˜[YB‚\Ú\™›]K”•[›ØÚÊ
-B‚‚\™]\›ˆ˜[YKYKš[ŸB‚‹ËÈÙ]ÝÜ™\È˜[YHÚ]Ý]ÛÜZ[™È]ˆHØ[\ˆ˜[œÙ™\œÈ™XY[Û›HÝÛ™\œÚ\‹ËÈÙˆHž]HÛXÙHÈHØXÚH›Üˆ\ÈÛ™È\ÈH[žH™[XZ[œÈ™XXÚX›K‚™[˜È
-È
-“Y[[ÜžPØXÚJHÙ]
-Ù^HÝš[™Ë˜[YH×Xž]K[YK‘\˜][ÛŠH\œ›ÜˆÂ‚ZYˆHÂ‚B\™]\›ˆ\œ’[˜[Y‚_B‚‚\™]\›ˆËœÙ]
-Ù^K˜[YKË››ÝÊ
-KY
-
-K•[š^˜[›Ê
-JBŸB‚‹ËÈ›Ü™]™\ˆÝÜ™\È˜[YHÚ]Ý]^\˜][Ûˆ[™Ú]Ý]ÛÜZ[™È]‚™[˜È
-È
-“Y[[ÜžPØXÚJH›Ü™]™\ŠÙ^HÝš[™Ë˜[YH×Xž]JH\œ›ÜˆÂ‚\™]\›ˆËœÙ]
-Ù^K˜[YK
-BŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJH›Ü™Ù]
-Ù^HÝš[™ÊH\œ›ÜˆÂ‚\Ú\™HËœÚ\™›ÜŠÙ^JB‚\Ú\™›]K“ØÚÊ
-B‚ZYˆ[žKÚÈHÚ\™™[šY\ÖÚÙ^WNÈÚÈÂ‚BY[]JÚ\™™[šY\ËÙ^JB‚BXË˜Ý\œ™[Y
-Y[žK˜ÛÜÝ
-B‚_B‚\Ú\™›]K•[›ØÚÊ
-B‚‚\™]\›ˆš[ŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJHÝXÚ
-Ù^HÝš[™Ë[YK‘\˜][ÛŠH\œ›ÜˆÂ‚ZYˆHÂ‚B\™]\›ˆ\œ’[˜[Y‚_B‚‚[›ÝÈHË››ÝÊ
-B‚\Ú\™HËœÚ\™›ÜŠÙ^JB‚Y^\™\Ð]H›ÝËY
-
-K•[š^˜[›Ê
-B‚‚\Ú\™›]K“ØÚÊ
-B‚ZYˆ[žKÚÈHÚ\™™[šY\ÖÚÙ^WNÈÚÈÂ‚BZYˆ[žK™^\™\Ð]ˆ	‰ˆ[žK™^\™\Ð]H›ÝË•[š^˜[›Ê
-HÂ‚BBY[]JÚ\™™[šY\ËÙ^JB‚BBXË˜Ý\œ™[Y
-Y[žK˜ÛÜÝ
-B‚B_H[ÙHÂ‚BBY[žK™^\™\Ð]H^\™\Ð]‚B_B‚_B‚\Ú\™›]K•[›ØÚÊ
-B‚\™]\›ˆš[ŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJHÙ]
-Ù^HÝš[™Ë˜[YH×Xž]K^\™\Ð][
-H\œ›ÜˆÂ‚XÛÜÝH][PÛÜÝ
-Ù^K˜[YJB‚ZYˆ[
-Ø\
-˜[YJJHˆË›X^][TÚ^™HÛÜÝˆË›X^Y[[ÜžHÂ‚B\™]\›ˆ\œ’][UÛÓ\™ÙB‚_B‚‚\Ú\™HËœÚ\™›ÜŠÙ^JB‚‚Y›ÜˆÂ‚B[›ÝÈHË››ÝÊ
-K•[š^˜[›Ê
-B‚BY[žHH	›Y[[ÜžQ[ž^Â‚BB]˜[YNˆ˜[YK‚BBY^\™\Ð]ˆ^\™\Ð]‚BBXÛÜÝˆÛÜÝ‚B_B‚BY[žK›\ÝXØÙ\ÜË”ÝÜ™J›ÝÊB‚‚B\Ú\™›]K“ØÚÊ
-B‚B[ÛHÚ\™™[šY\ÖÚÙ^WB‚B[ÛÛÜÝH[
-
-B‚BZYˆÛOHš[Â‚BB[ÛÛÜÝHÛ˜ÛÜÝ‚B_B‚BY[HHÛÜÝHÛÛÜÝ‚‚BZYˆ[HHËžT™\Ù\™J[JHÂ‚BB\Ú\™™[šY\ÖÚÙ^WHH[žB‚BBZYˆ[HÂ‚BBBXË˜Ý\œ™[Y
-[JB‚BB_B‚BB\Ú\™›]K•[›ØÚÊ
-B‚BB\™]\›ˆš[‚B_B‚B\Ú\™›]K•[›ØÚÊ
-B‚‚BZYˆ\œˆHË™]šXÝ›ÜŠ[JNÈ\œˆOHš[Â‚BB\™]\›ˆ\œ‚‚B_B‚_BŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJHžT™\Ù\™Jž]\È[
-H›ÛÛÂ‚ZYˆž]\ÈHÂ‚B\™]\›ˆYB‚_B‚‚Y›ÜˆÂ‚BXÝ\œ™[HË˜Ý\œ™[“ØY
+		lruSamples:  lruSamples,
+		now:         time.Now,
+	}, nil
+}
 
-B‚BZYˆÝ\œ™[
-Øž]\ÈˆË›X^Y[[ÜžHÂ‚BB\™]\›ˆ˜[ÙB‚B_B‚BZYˆË˜Ý\œ™[ÛÛ\\™P[™ÝØ\
-Ý\œ™[Ý\œ™[
-Øž]\ÊHÂ‚BB\™]\›ˆYB‚B_B‚_BŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJH]šXÝ›ÜŠ™\]Z\™Y[
-H\œ›ÜˆÂ‚XË™]šXÝ[Û“]K“ØÚÊ
-B‚YY™\ˆË™]šXÝ[Û“]K•[›ØÚÊ
-B‚‚ZYˆ™\]Z\™YHË˜Ý\œ™[“ØY
+// Get returns the cached value without copying it. The returned bytes are
+// read-only and must not be modified by the caller.
+func (c *MemoryCache) Get(key string) ([]byte, bool, error) {
+	shard := c.shardFor(key)
+	now := c.now().UnixNano()
 
-JÜ™\]Z\™YHË›X^Y[[ÜžHÂ‚B\™]\›ˆš[‚_B‚‚[›ÝÈHË››ÝÊ
-K•[š^˜[›Ê
-B‚XËœ\™ÙQ^\™Y
-›ÝÊB‚‚]\™Ù]HË›X^Y[[ÜžHH™\]Z\™Y‚[ÝÕØ]\ˆHË›X^Y[[ÜžH
-ˆ]šXÝ[Û•\™Ù]ÝÈL‚ZYˆÝÕØ]\ˆ\™Ù]Â‚B]\™Ù]HÝÕØ]\‚‚_B‚ZYˆ\™Ù]Â‚B]\™Ù]H‚_B‚‚Y›ÜˆË˜Ý\œ™[“ØY
+	shard.mu.RLock()
+	entry, ok := shard.entries[key]
+	if !ok {
+		shard.mu.RUnlock()
+		return nil, false, nil
+	}
+	if entry.expiresAt > 0 && entry.expiresAt <= now {
+		shard.mu.RUnlock()
+		c.deleteExpired(shard, key, entry, now)
+		return nil, false, nil
+	}
 
-Hˆ\™Ù]Â‚BZYˆXË™]šXÝÛ™S•J
-HÂ‚BBXœ™XZÂ‚B_B‚_B‚‚ZYˆË˜Ý\œ™[“ØY
+	entry.lastAccess.Store(now)
+	value := entry.value
+	shard.mu.RUnlock()
 
-JÜ™\]Z\™YˆË›X^Y[[ÜžHÂ‚B\™]\›ˆ\œØXÚQ[‚_B‚‚\™]\›ˆš[ŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJH\™ÙQ^\™Y
-›ÝÈ[
-HÂ‚Y›ÜˆHH˜[™ÙHËœÚ\™ÈÂ‚B\Ú\™H	˜ËœÚ\™ÖÚWB‚B\Ú\™›]K“ØÚÊ
-B‚BY›ÜˆÙ^K[žHH˜[™ÙHÚ\™™[šY\ÈÂ‚BBZYˆ[žK™^\™\Ð]ˆ	‰ˆ[žK™^\™\Ð]H›ÝÈÂ‚BBBY[]JÚ\™™[šY\ËÙ^JB‚BBBXË˜Ý\œ™[Y
-Y[žK˜ÛÜÝ
-B‚BB_B‚B_B‚B\Ú\™›]K•[›ØÚÊ
-B‚_BŸB‚\H]šXÝ[ÛØ[™Y]HÝXÝÂ‚\Ú\™
-›Y[[ÜžTÚ\™‚ZÙ^HÝš[™Â‚Y[žH
-›Y[[ÜžQ[žB‚[\ÝXØÙ\ÜÈ[ŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJH]šXÝÛ™S•J
-H›ÛÛÂ‚]˜\ˆÛ\Ý
-™]šXÝ[ÛØ[™Y]B‚‚X][\ÈHË›TØ[\\È
-ˆ‚ZYˆ][\È[ŠËœÚ\™ÊHÂ‚BX][\ÈH[ŠËœÚ\™ÊB‚_B‚‚\Ø[\YH‚Y›ÜˆHHÈH][\È	‰ˆØ[\YË›TØ[\\ÎÈJÊÈÂ‚B\Ú\™H	˜ËœÚ\™ÖÜ˜[™’[Š[ŠËœÚ\™ÊJWB‚B\Ú\™›]K”“ØÚÊ
-B‚BY›ÜˆÙ^K[žHH˜[™ÙHÚ\™™[šY\ÈÂ‚BBXØ[™Y]HH]šXÝ[ÛØ[™Y]^Â‚BBB\Ú\™ˆÚ\™‚BBBZÙ^NˆÙ^K‚BBBY[žNˆ[žK‚BBB[\ÝXØÙ\ÜÎˆ[žK›\ÝXØÙ\ÜË“ØY
+	return value, true, nil
+}
 
-K‚BB_B‚BBZYˆÛ\ÝOHš[Ø[™Y]K›\ÝXØÙ\ÜÈÛ\Ý›\ÝXØÙ\ÜÈÂ‚BBBXÛÜPØ[™Y]HHØ[™Y]B‚BBB[Û\ÝH	˜ÛÜPØ[™Y]B‚BB_B‚BB\Ø[\Y
-ÊÂ‚BBXœ™XZÂ‚B_B‚B\Ú\™›]K”•[›ØÚÊ
-B‚_B‚‚ZYˆÛ\ÝOHš[Â‚BKËÈÜ\œÙHØXÚ\ÈØ[ˆZ\ÜÈ[˜[™ÛHÚ\™Ëˆ˜[˜XÚÈÈHš\œÝ‚BKËÈ]˜Z[X›H[žHÛÈ]šXÝ[ÛˆØ[ˆ[Ø^\ÈXZÙH›ÙÜ™\ÜË‚‚BY›ÜˆHH˜[™ÙHËœÚ\™ÈÂ‚BB\Ú\™H	˜ËœÚ\™ÖÚWB‚BB\Ú\™›]K”“ØÚÊ
-B‚BBY›ÜˆÙ^K[žHH˜[™ÙHÚ\™™[šY\ÈÂ‚BBB[Û\ÝH	™]šXÝ[ÛØ[™Y]^Â‚BBBB\Ú\™ˆÚ\™‚BBBBZÙ^NˆÙ^K‚BBBBY[žNˆ[žK‚BBBB[\ÝXØÙ\ÜÎˆ[žK›\ÝXØÙ\ÜË“ØY
+// Set stores value without copying it. The caller transfers read-only ownership
+// of the byte slice to the cache for as long as the entry remains reachable.
+func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
 
-K‚BBB_B‚BBBXœ™XZÂ‚BB_B‚BB\Ú\™›]K”•[›ØÚÊ
-B‚BBZYˆÛ\ÝOHš[Â‚BBBXœ™XZÂ‚BB_B‚B_B‚_B‚‚ZYˆÛ\ÝOHš[Â‚B\™]\›ˆ˜[ÙB‚_B‚‚[Û\ÝœÚ\™›]K“ØÚÊ
-B‚XÝ\œ™[ÚÈHÛ\ÝœÚ\™™[šY\ÖÛÛ\ÝšÙ^WB‚ZYˆÚÈ	‰ˆÝ\œ™[OHÛ\Ý™[žHÂ‚BY[]JÛ\ÝœÚ\™™[šY\ËÛ\ÝšÙ^JB‚BXË˜Ý\œ™[Y
-[Û\Ý™[žK˜ÛÜÝ
-B‚B[Û\ÝœÚ\™›]K•[›ØÚÊ
-B‚B\™]\›ˆYB‚_B‚[Û\ÝœÚ\™›]K•[›ØÚÊ
-B‚‚\™]\›ˆYBŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJH[]Q^\™Y
-Ú\™
-›Y[[ÜžTÚ\™Ù^HÝš[™Ë^XÝY
-›Y[[ÜžQ[žK›ÝÈ[
-HÂ‚\Ú\™›]K“ØÚÊ
-B‚XÝ\œ™[ÚÈHÚ\™™[šY\ÖÚÙ^WB‚ZYˆÚÈ	‰ˆÝ\œ™[OH^XÝY	‰ˆÝ\œ™[™^\™\Ð]ˆ	‰ˆÝ\œ™[™^\™\Ð]H›ÝÈÂ‚BY[]JÚ\™™[šY\ËÙ^JB‚BXË˜Ý\œ™[Y
-XÝ\œ™[˜ÛÜÝ
-B‚_B‚\Ú\™›]K•[›ØÚÊ
-BŸB‚™[˜È
-È
-“Y[[ÜžPØXÚJHÚ\™›ÜŠÙ^HÝš[™ÊH
-›Y[[ÜžTÚ\™Â‚Z[™^HX\\Ú”Ýš[™ÊËš\ÚÙYYÙ^JH	HZ[
-[ŠËœÚ\™ÊJB‚\™]\›ˆ	˜ËœÚ\™ÖÚ[™^BŸB‚™[˜È][PÛÜÝ
-Ù^HÝš[™Ë˜[YH×Xž]JH[Â‚\™]\›ˆ[
-[ŠÙ^JJØØ\
-˜[YJJH
-È[žSÝ™\šXYž]\ÂŸB
+	return c.set(key, value, c.now().Add(ttl).UnixNano())
+}
+
+// Forever stores value without expiration and without copying it.
+func (c *MemoryCache) Forever(key string, value []byte) error {
+	return c.set(key, value, 0)
+}
+
+func (c *MemoryCache) Forget(key string) error {
+	shard := c.shardFor(key)
+	shard.mu.Lock()
+	if entry, ok := shard.entries[key]; ok {
+		delete(shard.entries, key)
+		c.current.Add(-entry.cost)
+	}
+	shard.mu.Unlock()
+
+	return nil
+}
+
+func (c *MemoryCache) Touch(key string, ttl time.Duration) error {
+	if ttl <= 0 {
+		return ErrInvalidTTL
+	}
+
+	now := c.now()
+	shard := c.shardFor(key)
+	expiresAt := now.Add(ttl).UnixNano()
+
+	shard.mu.Lock()
+	if entry, ok := shard.entries[key]; ok {
+		if entry.expiresAt > 0 && entry.expiresAt <= now.UnixNano() {
+			delete(shard.entries, key)
+			c.current.Add(-entry.cost)
+		} else {
+			entry.expiresAt = expiresAt
+		}
+	}
+	shard.mu.Unlock()
+
+	return nil
+}
+
+func (c *MemoryCache) set(key string, value []byte, expiresAt int64) error {
+	cost := itemCost(key, value)
+	if int64(cap(value)) > c.maxItemSize || cost > c.maxMemory {
+		return ErrItemTooLarge
+	}
+
+	shard := c.shardFor(key)
+
+	for {
+		now := c.now().UnixNano()
+		entry := &memoryEntry{
+			value:     value,
+			expiresAt: expiresAt,
+			cost:      cost,
+		}
+		entry.lastAccess.Store(now)
+
+		shard.mu.Lock()
+		old := shard.entries[key]
+		oldCost := int64(0)
+		if old != nil {
+			oldCost = old.cost
+		}
+		delta := cost - oldCost
+
+		if delta <= 0 || c.tryReserve(delta) {
+			shard.entries[key] = entry
+			if delta < 0 {
+				c.current.Add(delta)
+			}
+			shard.mu.Unlock()
+			return nil
+		}
+		shard.mu.Unlock()
+
+		if err := c.evictFor(delta); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *MemoryCache) tryReserve(bytes int64) bool {
+	if bytes <= 0 {
+		return true
+	}
+
+	for {
+		current := c.current.Load()
+		if current+bytes > c.maxMemory {
+			return false
+		}
+		if c.current.CompareAndSwap(current, current+bytes) {
+			return true
+		}
+	}
+}
+
+func (c *MemoryCache) evictFor(required int64) error {
+	c.evictionMu.Lock()
+	defer c.evictionMu.Unlock()
+
+	if required <= 0 || c.current.Load()+required <= c.maxMemory {
+		return nil
+	}
+
+	now := c.now().UnixNano()
+	c.purgeExpired(now)
+
+	target := c.maxMemory - required
+	lowWater := c.maxMemory * evictionTargetPct / 100
+	if lowWater < target {
+		target = lowWater
+	}
+	if target < 0 {
+		target = 0
+	}
+
+	for c.current.Load() > target {
+		if !c.evictOneLRU() {
+			break
+		}
+	}
+
+	if c.current.Load()+required > c.maxMemory {
+		return ErrCacheFull
+	}
+
+	return nil
+}
+
+func (c *MemoryCache) purgeExpired(now int64) {
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+		for key, entry := range shard.entries {
+			if entry.expiresAt > 0 && entry.expiresAt <= now {
+				delete(shard.entries, key)
+				c.current.Add(-entry.cost)
+			}
+		}
+		shard.mu.Unlock()
+	}
+}
+
+type evictionCandidate struct {
+	shard      *memoryShard
+	key        string
+	entry      *memoryEntry
+	lastAccess int64
+}
+
+func (c *MemoryCache) evictOneLRU() bool {
+	var oldest *evictionCandidate
+
+	attempts := c.lruSamples * 4
+	if attempts < len(c.shards) {
+		attempts = len(c.shards)
+	}
+
+	sampled := 0
+	for i := 0; i < attempts && sampled < c.lruSamples; i++ {
+		shard := &c.shards[rand.IntN(len(c.shards))]
+		shard.mu.RLock()
+		for key, entry := range shard.entries {
+			candidate := evictionCandidate{
+				shard:      shard,
+				key:        key,
+				entry:      entry,
+				lastAccess: entry.lastAccess.Load(),
+			}
+			if oldest == nil || candidate.lastAccess < oldest.lastAccess {
+				copyCandidate := candidate
+				oldest = &copyCandidate
+			}
+			sampled++
+			break
+		}
+		shard.mu.RUnlock()
+	}
+
+	if oldest == nil {
+		// Sparse caches can miss all random shards. Fall back to the first
+		// available entry so eviction can always make progress.
+		for i := range c.shards {
+			shard := &c.shards[i]
+			shard.mu.RLock()
+			for key, entry := range shard.entries {
+				oldest = &evictionCandidate{
+					shard:      shard,
+					key:        key,
+					entry:      entry,
+					lastAccess: entry.lastAccess.Load(),
+				}
+				break
+			}
+			shard.mu.RUnlock()
+			if oldest != nil {
+				break
+			}
+		}
+	}
+
+	if oldest == nil {
+		return false
+	}
+
+	oldest.shard.mu.Lock()
+	current, ok := oldest.shard.entries[oldest.key]
+	if ok && current == oldest.entry {
+		delete(oldest.shard.entries, oldest.key)
+		c.current.Add(-oldest.entry.cost)
+		oldest.shard.mu.Unlock()
+		return true
+	}
+	oldest.shard.mu.Unlock()
+
+	return true
+}
+
+func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *memoryEntry, now int64) {
+	shard.mu.Lock()
+	current, ok := shard.entries[key]
+	if ok && current == expected && current.expiresAt > 0 && current.expiresAt <= now {
+		delete(shard.entries, key)
+		c.current.Add(-current.cost)
+	}
+	shard.mu.Unlock()
+}
+
+func (c *MemoryCache) shardFor(key string) *memoryShard {
+	index := maphash.String(c.hashSeed, key) % uint64(len(c.shards))
+	return &c.shards[index]
+}
+
+func itemCost(key string, value []byte) int64 {
+	return int64(len(key)+cap(value)) + entryOverheadBytes
+}
