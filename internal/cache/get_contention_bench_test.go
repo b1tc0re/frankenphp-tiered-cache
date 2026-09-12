@@ -34,6 +34,11 @@ func benchmarkMemoryCacheGet(b *testing.B, workers int, distinctKeys, tracked bo
 	if err != nil {
 		b.Fatalf("NewMemoryCache() error = %v", err)
 	}
+	defer func() {
+		if err := cache.Close(); err != nil {
+			b.Errorf("Close() error = %v", err)
+		}
+	}()
 
 	keys := make([]string, workers)
 	if distinctKeys {
@@ -98,7 +103,7 @@ func benchmarkMemoryCacheGet(b *testing.B, workers int, distinctKeys, tracked bo
 
 // memoryCacheGetWithoutAccessTracking mirrors MemoryCache.Get but intentionally
 // omits recordAccess. It exists only as a benchmark baseline for measuring the
-// cost of the global access sequence and per-entry lastAccess update.
+// cost of coarse LRU access tracking.
 func memoryCacheGetWithoutAccessTracking(cache *MemoryCache, key string) ([]byte, error) {
 	shard := cache.shardFor(key)
 	now := cache.now().UnixNano()
