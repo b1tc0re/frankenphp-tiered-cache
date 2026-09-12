@@ -17,10 +17,11 @@ tasks:
       - echo 'Built {{.IMAGE}}'
 
   smoke:
-    desc: Build the image and run the extension smoke test
+    desc: Build the image and run extension and MemoryCache PHP bridge smoke tests
     cmds:
       - task: build
       - docker run --rm --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
+      - docker run --rm --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
 
   test:
     desc: Run Go cache tests
