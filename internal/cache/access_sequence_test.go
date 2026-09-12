@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -47,6 +48,65 @@ func TestMemoryCacheAccessSequenceTracksSuccessfulAccesses(t *testing.T) {
 	}
 	if seq := cache.accessSeq.Load(); seq != 3 {
 		t.Fatalf("access sequence after miss = %d, want 3", seq)
+	}
+}
+
+func TestMemoryCacheLastAccessDoesNotRegressWithConcurrentUpdates(t *testing.T) {
+	entry := &memoryEntry{}
+
+	lowReady := make(chan struct{})
+	releaseLow := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		close(lowReady)
+		<-releaseLow
+		storeMaxAccessSequence(entry, 1)
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-lowReady
+		storeMaxAccessSequence(entry, 2)
+		close(releaseLow)
+	}()
+
+	wg.Wait()
+
+	if got := entry.lastAccess.Load(); got != 2 {
+		t.Fatalf("lastAccess = %d, want 2", got)
+	}
+}
+
+func TestMemoryCacheConcurrentGetsKeepNewestAccessSequence(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{})
+	mustForever(t, cache, "key", []byte("value"))
+
+	const (
+		workers    = 32
+		iterations = 1000
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				got, err := cache.Get("key")
+				if err != nil || got == nil {
+					t.Errorf("Get() = %q, %v; want hit", got, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got, want := memoryEntryAccessSequence(cache, "key"), cache.accessSeq.Load(); got != want {
+		t.Fatalf("lastAccess = %d, access sequence = %d; want equal", got, want)
 	}
 }
 
