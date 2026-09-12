@@ -8,6 +8,8 @@ import (
 
 func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
+	stopMemoryCacheMaintenanceForTest(cache)
+
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -70,6 +72,8 @@ func TestStoreMaxAccessClockDoesNotRegressWithConcurrentUpdates(t *testing.T) {
 
 func TestMemoryCacheConcurrentGetsUseCurrentLRUClock(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
+	stopMemoryCacheMaintenanceForTest(cache)
+
 	mustForever(t, cache, "key", []byte("value"))
 	clock := cache.lruClock.Add(1)
 
@@ -118,6 +122,13 @@ func TestMemoryCacheCloseStopsMaintenance(t *testing.T) {
 	if err := cache.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
+}
+
+func stopMemoryCacheMaintenanceForTest(cache *MemoryCache) {
+	cache.closeOnce.Do(func() {
+		close(cache.maintenanceStop)
+		<-cache.maintenanceDone
+	})
 }
 
 func memoryEntryAccessClock(cache *MemoryCache, key string) uint64 {
