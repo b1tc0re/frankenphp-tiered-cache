@@ -282,11 +282,7 @@ func (c *MemoryCache) runMaintenance() {
 		select {
 		case now := <-ticker.C:
 			c.lruClock.Add(1)
-			c.purgeExpiredSample(&c.shards[nextCleanupShard], now, backgroundCleanupSample)
-			nextCleanupShard++
-			if nextCleanupShard == len(c.shards) {
-				nextCleanupShard = 0
-			}
+			nextCleanupShard = c.purgeExpiredBackgroundBatch(now, nextCleanupShard)
 		case <-c.maintenanceStop:
 			return
 		}
