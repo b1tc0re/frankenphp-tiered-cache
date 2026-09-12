@@ -25,8 +25,8 @@ func TestMemoryCacheStaleEvictionCandidateDoesNotRemoveReplacement(t *testing.T)
 	mustForever(t, cache, "key", []byte("new"))
 	before := cache.current.Load()
 
-	if cache.tryEvictCandidate(candidate) {
-		t.Fatal("tryEvictCandidate() = true for stale candidate; want false")
+	if result := cache.tryEvictCandidate(candidate); result.removed {
+		t.Fatal("tryEvictCandidate() removed stale candidate; want false")
 	}
 	if got := cache.current.Load(); got != before {
 		t.Fatalf("current bytes = %d after stale eviction attempt, want %d", got, before)
@@ -62,8 +62,15 @@ func TestMemoryCacheEvictionCandidateReportsActualDeletion(t *testing.T) {
 	}
 	before := cache.current.Load()
 
-	if !cache.tryEvictCandidate(candidate) {
-		t.Fatal("tryEvictCandidate() = false for current candidate; want true")
+	result := cache.tryEvictCandidate(candidate)
+	if !result.removed {
+		t.Fatal("tryEvictCandidate() did not remove current candidate")
+	}
+	if !result.live {
+		t.Fatal("tryEvictCandidate() marked live candidate as expired")
+	}
+	if result.bytes != entry.cost {
+		t.Fatalf("evicted bytes = %d, want %d", result.bytes, entry.cost)
 	}
 	if got := cache.current.Load(); got != before-entry.cost {
 		t.Fatalf("current bytes = %d after eviction, want %d", got, before-entry.cost)

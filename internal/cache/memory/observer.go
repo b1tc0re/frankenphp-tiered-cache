@@ -1,6 +1,7 @@
 package memory
 
 // Observer receives diagnostic events from MemoryCache.
+// Callbacks run synchronously after internal eviction locks are released.
 // Implementations must be safe for concurrent use and should return quickly.
 type Observer interface {
 	OnEviction(EvictionEvent)

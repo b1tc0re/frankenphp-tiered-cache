@@ -14,16 +14,29 @@ func (o *recordingObserver) OnEviction(event EvictionEvent) {
 }
 
 type lockCheckingObserver struct {
-	cache         *MemoryCache
-	lockAvailable bool
+	cache               *MemoryCache
+	shardLockAvailable  bool
+	evictionMuAvailable bool
 }
 
 func (o *lockCheckingObserver) OnEviction(EvictionEvent) {
 	shard := &o.cache.shards[0]
 	if shard.mu.TryLock() {
-		o.lockAvailable = true
+		o.shardLockAvailable = true
 		shard.mu.Unlock()
 	}
+	if o.cache.evictionMu.TryLock() {
+		o.evictionMuAvailable = true
+		o.cache.evictionMu.Unlock()
+	}
+}
+
+type reentrantFlushObserver struct {
+	cache *MemoryCache
+}
+
+func (o *reentrantFlushObserver) OnEviction(EvictionEvent) {
+	_, _ = o.cache.Flush()
 }
 
 func TestObserverReportsLivePressureEviction(t *testing.T) {
@@ -97,8 +110,38 @@ func TestObserverRunsAfterShardUnlock(t *testing.T) {
 	mustObserverForever(t, cache, "a", make([]byte, 60))
 	mustObserverForever(t, cache, "b", make([]byte, 60))
 
-	if !observer.lockAvailable {
+	if !observer.shardLockAvailable {
 		t.Fatal("observer was called while the eviction shard lock was held")
+	}
+	if !observer.evictionMuAvailable {
+		t.Fatal("observer was called while evictionMu was held")
+	}
+}
+
+func TestObserverCanReenterFlushWithoutDeadlock(t *testing.T) {
+	observer := &reentrantFlushObserver{}
+	cache := newObserverTestCache(t, Config{
+		MaxMemoryBytes:   100,
+		MaxItemSizeBytes: 100,
+		Observer:         observer,
+	}, 1)
+	observer.cache = cache
+
+	mustObserverForever(t, cache, "a", make([]byte, 60))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.Forever("b", make([]byte, 60))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Forever() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("observer reentrant Flush() deadlocked")
 	}
 }
 
