@@ -132,13 +132,14 @@ func (c *MemoryCache) Forget(key string) (bool, error) {
 	return !expired, nil
 }
 
-// Touch updates the TTL of a live key. It returns false when the key is missing or expired.
+// Touch updates the TTL and access time of a live key. It returns false when the key is missing or expired.
 func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
 		return false, ErrInvalidTTL
 	}
 
 	now := c.now()
+	nowUnixNano := now.UnixNano()
 	shard := c.shardFor(key)
 	expiresAt := now.Add(ttl).UnixNano()
 
@@ -148,7 +149,7 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 		shard.mu.Unlock()
 		return false, nil
 	}
-	if entry.expiresAt > 0 && entry.expiresAt <= now.UnixNano() {
+	if entry.expiresAt > 0 && entry.expiresAt <= nowUnixNano {
 		delete(shard.entries, key)
 		c.current.Add(-entry.cost)
 		shard.mu.Unlock()
@@ -156,6 +157,7 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	entry.expiresAt = expiresAt
+	entry.lastAccess.Store(nowUnixNano)
 	shard.mu.Unlock()
 
 	return true, nil
