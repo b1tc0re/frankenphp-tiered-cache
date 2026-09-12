@@ -34,6 +34,7 @@ type MemoryCache struct {
 	hashSeed    maphash.Seed
 	maxMemory   int64
 	maxItemSize int64
+	observer    Observer
 	current     atomic.Int64
 	lruClock    atomic.Uint64
 	evictionMu  sync.Mutex
@@ -73,6 +74,7 @@ func newMemoryCache(config Config, shardCount, lruSamples int) (*MemoryCache, er
 		hashSeed:        maphash.MakeSeed(),
 		maxMemory:       cfg.MaxMemoryBytes,
 		maxItemSize:     cfg.MaxItemSizeBytes,
+		observer:        cfg.Observer,
 		lruSamples:      lruSamples,
 		now:             time.Now,
 		maintenanceStop: make(chan struct{}),
@@ -416,14 +418,24 @@ func (c *MemoryCache) evictOneLRU() bool {
 func (c *MemoryCache) tryEvictCandidate(candidate *evictionCandidate) bool {
 	candidate.shard.mu.Lock()
 	current, ok := candidate.shard.entries[candidate.key]
-	if ok && current == candidate.entry {
-		delete(candidate.shard.entries, candidate.key)
-		c.current.Add(-candidate.entry.cost)
+	if !ok || current != candidate.entry {
 		candidate.shard.mu.Unlock()
-		return true
+		return false
 	}
+
+	expired := false
+	if !current.expiresAt.IsZero() {
+		expired = isExpired(current.expiresAt, c.now())
+	}
+	cost := current.cost
+	delete(candidate.shard.entries, candidate.key)
+	c.current.Add(-cost)
 	candidate.shard.mu.Unlock()
-	return false
+
+	if !expired && c.observer != nil {
+		c.observer.OnEviction(EvictionEvent{Bytes: cost})
+	}
+	return true
 }
 
 func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *memoryEntry, now time.Time) {

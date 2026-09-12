@@ -14,6 +14,7 @@ const (
 type Config struct {
 	MaxMemoryBytes   int64
 	MaxItemSizeBytes int64
+	Observer         Observer
 }
 
 func (c Config) normalized() (Config, error) {
