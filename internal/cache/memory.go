@@ -189,7 +189,7 @@ func (c *MemoryCache) Flush() (bool, error) {
 	}
 
 	for i := range c.shards {
-		clear(c.shards[i].entries)
+		c.shards[i].entries = make(map[string]*memoryEntry)
 	}
 	c.current.Store(0)
 
