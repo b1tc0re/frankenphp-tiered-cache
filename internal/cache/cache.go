@@ -18,4 +18,5 @@ type Cache interface {
 	Forget(key string) (bool, error)
 	Touch(key string, ttl time.Duration) (bool, error)
 	Flush() (bool, error)
+	Close() error
 }
