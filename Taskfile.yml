@@ -38,9 +38,9 @@ tasks:
       - go test -run '^$' -bench '^BenchmarkMemoryCacheGetContention$' -benchmem -benchtime=3s -count=3 ./internal/cache
 
   bench:cleanup:
-    desc: Measure background cleanup scan cost and worst-case Set contention
+    desc: Measure background cleanup scan, expiration removal, and worst-case Get/Set contention
     cmds:
-      - go test -run '^$' -bench '^BenchmarkMemoryCache(BackgroundCleanupScan|SetWithBackgroundCleanup)$' -benchmem -benchtime=3s -count=3 ./internal/cache
+      - go test -run '^$' -bench '^BenchmarkMemoryCache.*BackgroundCleanup$' -benchmem -benchtime=3s -count=3 ./internal/cache
 
   bench:memory:
     desc: Measure MemoryCache accounting, Go heap, and process RSS
