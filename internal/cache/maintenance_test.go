@@ -51,6 +51,42 @@ func TestMemoryCachePurgeExpiredShardOnlyCleansTargetShard(t *testing.T) {
 	}
 }
 
+func TestMemoryCachePurgeExpiredSampleIsBounded(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{})
+	stopMemoryCacheMaintenanceForTest(cache)
+
+	now := time.Unix(100, 0)
+	cache.now = func() time.Time { return now }
+
+	const entries = 5
+	keys := make([]string, 0, entries)
+	for i := 0; i < entries; i++ {
+		key := keyForMemoryShard(t, cache, 0, fmt.Sprintf("sample-%d", i))
+		keys = append(keys, key)
+		mustSet(t, cache, key, []byte("value"), time.Second)
+	}
+
+	before := cache.current.Load()
+	now = now.Add(2 * time.Second)
+	cache.purgeExpiredSample(&cache.shards[0], now, 2)
+
+	remaining := 0
+	remainingCost := int64(0)
+	for _, key := range keys {
+		if memoryShardHasKey(&cache.shards[0], key) {
+			remaining++
+			remainingCost += itemCost(key, []byte("value"))
+		}
+	}
+
+	if remaining != entries-2 {
+		t.Fatalf("remaining entries = %d, want %d", remaining, entries-2)
+	}
+	if got := cache.current.Load(); got != remainingCost {
+		t.Fatalf("current bytes = %d after bounded cleanup, want %d (before=%d)", got, remainingCost, before)
+	}
+}
+
 func keyForMemoryShard(t *testing.T, cache *MemoryCache, shardIndex int, prefix string) string {
 	t.Helper()
 
