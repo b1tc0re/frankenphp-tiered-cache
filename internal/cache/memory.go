@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	lruClockResolution = time.Second
-	maxEvictionRetries = 3
+	lruClockResolution      = time.Second
+	maxEvictionRetries      = 3
+	backgroundCleanupSample = 64
 )
 
 type memoryEntry struct {
@@ -281,7 +282,7 @@ func (c *MemoryCache) runMaintenance() {
 		select {
 		case now := <-ticker.C:
 			c.lruClock.Add(1)
-			c.purgeExpiredShard(&c.shards[nextCleanupShard], now)
+			c.purgeExpiredSample(&c.shards[nextCleanupShard], now, backgroundCleanupSample)
 			nextCleanupShard++
 			if nextCleanupShard == len(c.shards) {
 				nextCleanupShard = 0
@@ -365,6 +366,40 @@ func (c *MemoryCache) purgeExpiredShard(shard *memoryShard, now time.Time) {
 		}
 	}
 	shard.mu.Unlock()
+}
+
+type expirationCandidate struct {
+	key   string
+	entry *memoryEntry
+}
+
+func (c *MemoryCache) purgeExpiredSample(shard *memoryShard, now time.Time, sampleSize int) {
+	if sampleSize <= 0 {
+		return
+	}
+
+	candidates := make([]expirationCandidate, 0, sampleSize)
+
+	shard.mu.RLock()
+	sampled := 0
+	for key, entry := range shard.entries {
+		if isExpired(entry.expiresAt, now) {
+			candidates = append(candidates, expirationCandidate{
+				key:   key,
+				entry: entry,
+			})
+		}
+
+		sampled++
+		if sampled >= sampleSize {
+			break
+		}
+	}
+	shard.mu.RUnlock()
+
+	for i := range candidates {
+		c.deleteExpired(shard, candidates[i].key, candidates[i].entry, now)
+	}
 }
 
 type evictionCandidate struct {
