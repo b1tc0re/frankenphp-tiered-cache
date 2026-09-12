@@ -1,14 +1,13 @@
 package cache
 
 import (
+	"fmt"
 	"hash/maphash"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-const entryOverheadBytes int64 = 64
 
 type memoryEntry struct {
 	value      []byte
@@ -101,7 +100,7 @@ func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 		return false, ErrNilValue
 	}
 
-	return c.set(key, value, c.now().Add(ttl).UnixNano()), nil
+	return c.set(key, value, c.now().Add(ttl).UnixNano())
 }
 
 // Forever stores value without expiration and without copying it.
@@ -110,7 +109,7 @@ func (c *MemoryCache) Forever(key string, value []byte) (bool, error) {
 		return false, ErrNilValue
 	}
 
-	return c.set(key, value, 0), nil
+	return c.set(key, value, 0)
 }
 
 // Forget removes a live key. It returns false when the key is missing or has expired.
@@ -183,10 +182,15 @@ func (c *MemoryCache) Flush() (bool, error) {
 	return true, nil
 }
 
-func (c *MemoryCache) set(key string, value []byte, expiresAt int64) bool {
+func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, error) {
 	cost := itemCost(key, value)
-	if int64(cap(value)) > c.maxItemSize || cost > c.maxMemory {
-		return false
+	if cost > c.maxItemSize {
+		return false, fmt.Errorf(
+			"%w: item size %d bytes exceeds limit %d bytes",
+			ErrItemTooLarge,
+			cost,
+			c.maxItemSize,
+		)
 	}
 
 	shard := c.shardFor(key)
@@ -214,12 +218,12 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) bool {
 				c.current.Add(delta)
 			}
 			shard.mu.Unlock()
-			return true
+			return true, nil
 		}
 		shard.mu.Unlock()
 
 		if !c.evictFor(delta) {
-			return false
+			return false, nil
 		}
 	}
 }
@@ -372,5 +376,5 @@ func (c *MemoryCache) shardFor(key string) *memoryShard {
 }
 
 func itemCost(key string, value []byte) int64 {
-	return int64(len(key)+cap(value)) + entryOverheadBytes
+	return int64(len(key) + cap(value))
 }
