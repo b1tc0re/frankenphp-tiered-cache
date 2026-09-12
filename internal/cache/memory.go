@@ -86,7 +86,6 @@ func newMemoryCache(config MemoryConfig, shardCount, lruSamples int) (*MemoryCac
 // means cache miss. Returned bytes are read-only and must not be modified.
 func (c *MemoryCache) Get(key string) ([]byte, error) {
 	shard := c.shardFor(key)
-	now := c.now()
 
 	shard.mu.RLock()
 	entry, ok := shard.entries[key]
@@ -94,6 +93,8 @@ func (c *MemoryCache) Get(key string) ([]byte, error) {
 		shard.mu.RUnlock()
 		return nil, nil
 	}
+
+	now := c.now()
 	if isExpired(entry.expiresAt, now) {
 		shard.mu.RUnlock()
 		c.deleteExpired(shard, key, entry, now)
@@ -103,7 +104,6 @@ func (c *MemoryCache) Get(key string) ([]byte, error) {
 	c.recordAccess(entry)
 	value := entry.value
 	shard.mu.RUnlock()
-
 	return value, nil
 }
 
@@ -116,8 +116,7 @@ func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 	if value == nil {
 		return false, ErrNilValue
 	}
-
-	return c.set(key, value, c.now().Add(ttl))
+	return c.set(key, value, ttl, false)
 }
 
 // Forever stores value without expiration and without copying it.
@@ -125,14 +124,12 @@ func (c *MemoryCache) Forever(key string, value []byte) (bool, error) {
 	if value == nil {
 		return false, ErrNilValue
 	}
-
-	return c.set(key, value, time.Time{})
+	return c.set(key, value, 0, true)
 }
 
 // Forget removes a live key. It returns false when the key is missing or has expired.
 func (c *MemoryCache) Forget(key string) (bool, error) {
 	shard := c.shardFor(key)
-	now := c.now()
 
 	shard.mu.Lock()
 	entry, ok := shard.entries[key]
@@ -141,11 +138,11 @@ func (c *MemoryCache) Forget(key string) (bool, error) {
 		return false, nil
 	}
 
+	now := c.now()
 	delete(shard.entries, key)
 	c.current.Add(-entry.cost)
 	expired := isExpired(entry.expiresAt, now)
 	shard.mu.Unlock()
-
 	return !expired, nil
 }
 
@@ -155,16 +152,15 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 		return false, ErrInvalidTTL
 	}
 
-	now := c.now()
 	shard := c.shardFor(key)
-	expiresAt := now.Add(ttl)
-
 	shard.mu.Lock()
 	entry, ok := shard.entries[key]
 	if !ok {
 		shard.mu.Unlock()
 		return false, nil
 	}
+
+	now := c.now()
 	if isExpired(entry.expiresAt, now) {
 		delete(shard.entries, key)
 		c.current.Add(-entry.cost)
@@ -172,10 +168,9 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 		return false, nil
 	}
 
-	entry.expiresAt = expiresAt
+	entry.expiresAt = now.Add(ttl)
 	c.recordAccess(entry)
 	shard.mu.Unlock()
-
 	return true, nil
 }
 
@@ -187,16 +182,13 @@ func (c *MemoryCache) Flush() (bool, error) {
 	for i := range c.shards {
 		c.shards[i].mu.Lock()
 	}
-
 	for i := range c.shards {
 		c.shards[i].entries = make(map[string]*memoryEntry)
 	}
 	c.current.Store(0)
-
 	for i := len(c.shards) - 1; i >= 0; i-- {
 		c.shards[i].mu.Unlock()
 	}
-
 	return true, nil
 }
 
@@ -206,11 +198,10 @@ func (c *MemoryCache) Close() error {
 		close(c.maintenanceStop)
 		<-c.maintenanceDone
 	})
-
 	return nil
 }
 
-func (c *MemoryCache) set(key string, value []byte, expiresAt time.Time) (bool, error) {
+func (c *MemoryCache) set(key string, value []byte, ttl time.Duration, forever bool) (bool, error) {
 	cost := itemCost(key, value)
 	if cost > c.maxItemSize {
 		return false, fmt.Errorf(
@@ -222,14 +213,7 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt time.Time) (bool, 
 	}
 
 	shard := c.shardFor(key)
-
 	for {
-		entry := &memoryEntry{
-			value:     value,
-			expiresAt: expiresAt,
-			cost:      cost,
-		}
-
 		shard.mu.Lock()
 		old := shard.entries[key]
 		oldCost := int64(0)
@@ -239,6 +223,15 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt time.Time) (bool, 
 		delta := cost - oldCost
 
 		if delta <= 0 || c.tryReserve(delta) {
+			expiresAt := time.Time{}
+			if !forever {
+				expiresAt = c.now().Add(ttl)
+			}
+			entry := &memoryEntry{
+				value:     value,
+				expiresAt: expiresAt,
+				cost:      cost,
+			}
 			c.recordAccess(entry)
 			shard.entries[key] = entry
 			if delta < 0 {
@@ -293,7 +286,6 @@ func (c *MemoryCache) tryReserve(bytes int64) bool {
 	if bytes <= 0 {
 		return true
 	}
-
 	for {
 		current := c.current.Load()
 		if current+bytes > c.maxMemory {
@@ -332,18 +324,15 @@ func (c *MemoryCache) evictFor(required int64) bool {
 			failedEvictions = 0
 			continue
 		}
-
 		if c.current.Load() < before {
 			failedEvictions = 0
 			continue
 		}
-
 		failedEvictions++
 		if failedEvictions >= maxEvictionRetries {
 			break
 		}
 	}
-
 	return c.current.Load()+required <= c.maxMemory
 }
 
@@ -373,12 +362,10 @@ type evictionCandidate struct {
 
 func (c *MemoryCache) evictOneLRU() bool {
 	var oldest *evictionCandidate
-
 	attempts := c.lruSamples * 4
 	if attempts < len(c.shards) {
 		attempts = len(c.shards)
 	}
-
 	sampled := 0
 	for i := 0; i < attempts && sampled < c.lruSamples; i++ {
 		shard := &c.shards[rand.IntN(len(c.shards))]
@@ -399,7 +386,6 @@ func (c *MemoryCache) evictOneLRU() bool {
 		}
 		shard.mu.RUnlock()
 	}
-
 	if oldest == nil {
 		for i := range c.shards {
 			shard := &c.shards[i]
@@ -419,11 +405,9 @@ func (c *MemoryCache) evictOneLRU() bool {
 			}
 		}
 	}
-
 	if oldest == nil {
 		return false
 	}
-
 	return c.tryEvictCandidate(oldest)
 }
 
@@ -437,7 +421,6 @@ func (c *MemoryCache) tryEvictCandidate(candidate *evictionCandidate) bool {
 		return true
 	}
 	candidate.shard.mu.Unlock()
-
 	return false
 }
 

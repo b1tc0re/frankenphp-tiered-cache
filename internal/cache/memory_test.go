@@ -427,6 +427,7 @@ func newTestMemoryCache(t *testing.T, config MemoryConfig) *MemoryCache {
 	if err != nil {
 		t.Fatalf("NewMemoryCache() error = %v", err)
 	}
+	stopMemoryCacheMaintenanceForTest(cache)
 	t.Cleanup(func() {
 		if err := cache.Close(); err != nil {
 			t.Errorf("Close() error = %v", err)
