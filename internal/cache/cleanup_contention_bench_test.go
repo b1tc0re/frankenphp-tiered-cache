@@ -7,40 +7,37 @@ import (
 	"time"
 )
 
-const (
-	cleanupExpiredBenchSampleSize = 64
-	cleanupExpiredBenchBatchSize  = 256
-)
-
-var backgroundCleanupSampleSizes = [...]int{16, 32, 64, 128, 256}
-var backgroundCleanupExpiredCounts = [...]int{0, 16, 64}
+const cleanupExpiredBenchBatchSize = 256
 
 func BenchmarkMemoryCacheBackgroundCleanupScan(b *testing.B) {
-	for _, sampleSize := range backgroundCleanupSampleSizes {
-		sampleSize := sampleSize
-		b.Run(fmt.Sprintf("sample=%d", sampleSize), func(b *testing.B) {
-			cache := newCleanupBenchCache(b)
-			populateCleanupBenchShard(b, cache, 0, 2048)
-			shard := &cache.shards[0]
-			now := time.Now()
+	cache := newCleanupBenchCache(b)
+	populateCleanupBenchShard(b, cache, 0, 2048)
+	shard := &cache.shards[0]
+	now := time.Now()
 
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				cache.purgeExpiredSample(shard, now, sampleSize)
-			}
-		})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.purgeExpiredSample(shard, now, backgroundCleanupSample)
 	}
 }
 
 func BenchmarkMemoryCacheBackgroundCleanupExpired(b *testing.B) {
-	for _, expiredCount := range backgroundCleanupExpiredCounts {
-		expiredCount := expiredCount
-		b.Run(fmt.Sprintf("expired=%d", expiredCount), func(b *testing.B) {
+	cases := []struct {
+		name         string
+		expiredCount int
+	}{
+		{name: "live", expiredCount: 0},
+		{name: "all-expired", expiredCount: backgroundCleanupSample},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		b.Run(tc.name, func(b *testing.B) {
 			cache := &MemoryCache{}
 			shards := make([]memoryShard, cleanupExpiredBenchBatchSize)
 			now := time.Now()
-			cache.current.Store(resetCleanupExpiredBenchShards(shards, now, expiredCount))
+			cache.current.Store(resetCleanupExpiredBenchShards(shards, now, tc.expiredCount))
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -53,13 +50,13 @@ func BenchmarkMemoryCacheBackgroundCleanupExpired(b *testing.B) {
 				}
 
 				for i := 0; i < batch; i++ {
-					cache.purgeExpiredSample(&shards[i], now, cleanupExpiredBenchSampleSize)
+					cache.purgeExpiredSample(&shards[i], now, backgroundCleanupSample)
 				}
 				completed += batch
 
 				if completed < b.N {
 					b.StopTimer()
-					cache.current.Store(resetCleanupExpiredBenchShards(shards, now, expiredCount))
+					cache.current.Store(resetCleanupExpiredBenchShards(shards, now, tc.expiredCount))
 					b.StartTimer()
 				}
 			}
@@ -67,77 +64,15 @@ func BenchmarkMemoryCacheBackgroundCleanupExpired(b *testing.B) {
 	}
 }
 
-func BenchmarkMemoryCacheSetWithBackgroundCleanup(b *testing.B) {
-	cases := []struct {
-		name       string
-		sampleSize int
-	}{
-		{name: "baseline", sampleSize: 0},
-		{name: "sample=16", sampleSize: 16},
-		{name: "sample=64", sampleSize: 64},
-		{name: "sample=256", sampleSize: 256},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		b.Run(tc.name, func(b *testing.B) {
-			cache := newCleanupBenchCache(b)
-			populateCleanupBenchShard(b, cache, 0, 2048)
-
-			setKey := keyForCleanupBenchShard(b, cache, 0, "set")
-			value := []byte("value")
-			stored, err := cache.Forever(setKey, value)
-			if err != nil || !stored {
-				b.Fatalf("Forever(%q) = %v, %v; want true, nil", setKey, stored, err)
-			}
-
-			var stop chan struct{}
-			var wg sync.WaitGroup
-			if tc.sampleSize > 0 {
-				stop = make(chan struct{})
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					shard := &cache.shards[0]
-					now := time.Now()
-					for {
-						select {
-						case <-stop:
-							return
-						default:
-							cache.purgeExpiredSample(shard, now, tc.sampleSize)
-						}
-					}
-				}()
-			}
-
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				stored, err := cache.Forever(setKey, value)
-				if err != nil || !stored {
-					b.Fatalf("Forever(%q) = %v, %v; want true, nil", setKey, stored, err)
-				}
-			}
-			b.StopTimer()
-
-			if stop != nil {
-				close(stop)
-				wg.Wait()
-			}
-		})
-	}
+func BenchmarkMemoryCacheGetCleanupContention(b *testing.B) {
+	benchmarkMemoryCacheCleanupContention(b, false)
 }
 
-func BenchmarkMemoryCacheSetWithExpiredBackgroundCleanup(b *testing.B) {
-	benchmarkMemoryCacheWithExpiredBackgroundCleanup(b, true)
+func BenchmarkMemoryCacheSetCleanupContention(b *testing.B) {
+	benchmarkMemoryCacheCleanupContention(b, true)
 }
 
-func BenchmarkMemoryCacheGetWithExpiredBackgroundCleanup(b *testing.B) {
-	benchmarkMemoryCacheWithExpiredBackgroundCleanup(b, false)
-}
-
-func benchmarkMemoryCacheWithExpiredBackgroundCleanup(b *testing.B, set bool) {
+func benchmarkMemoryCacheCleanupContention(b *testing.B, set bool) {
 	b.Helper()
 
 	cases := []struct {
@@ -146,9 +81,8 @@ func benchmarkMemoryCacheWithExpiredBackgroundCleanup(b *testing.B, set bool) {
 		cleanup      bool
 	}{
 		{name: "baseline"},
-		{name: "expired=0", expiredCount: 0, cleanup: true},
-		{name: "expired=16", expiredCount: 16, cleanup: true},
-		{name: "expired=64", expiredCount: 64, cleanup: true},
+		{name: "live-scan", cleanup: true},
+		{name: "all-expired", expiredCount: backgroundCleanupSample, cleanup: true},
 	}
 
 	for _, tc := range cases {
@@ -177,7 +111,7 @@ func benchmarkMemoryCacheWithExpiredBackgroundCleanup(b *testing.B, set bool) {
 						case <-stop:
 							return
 						default:
-							cache.purgeExpiredSample(shard, now, cleanupExpiredBenchSampleSize)
+							cache.purgeExpiredSample(shard, now, backgroundCleanupSample)
 							restoreCleanupContentionEntries(cache, shard, expiredEntries)
 						}
 					}
@@ -247,8 +181,8 @@ func resetCleanupExpiredBenchShards(shards []memoryShard, now time.Time, expired
 	var totalCost int64
 
 	for i := range shards {
-		entries := make(map[string]*memoryEntry, cleanupExpiredBenchSampleSize)
-		for entryIndex := 0; entryIndex < cleanupExpiredBenchSampleSize; entryIndex++ {
+		entries := make(map[string]*memoryEntry, backgroundCleanupSample)
+		for entryIndex := 0; entryIndex < backgroundCleanupSample; entryIndex++ {
 			key := fmt.Sprintf("expired-bench:%d", entryIndex)
 			expiresAt := time.Time{}
 			if entryIndex < expiredCount {
@@ -273,7 +207,7 @@ func populateCleanupContentionEntries(cache *MemoryCache, shardIndex int, now ti
 	expiredEntries := make(map[string]*memoryEntry, expiredCount)
 
 	shard.mu.Lock()
-	for i := 0; i < cleanupExpiredBenchSampleSize; i++ {
+	for i := 0; i < backgroundCleanupSample; i++ {
 		key := fmt.Sprintf("cleanup-contention:%d", i)
 		expiresAt := time.Time{}
 		if i < expiredCount {

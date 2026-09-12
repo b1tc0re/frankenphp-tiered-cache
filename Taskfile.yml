@@ -33,12 +33,12 @@ tasks:
       - go test -race ./internal/...
 
   bench:get:
-    desc: Measure MemoryCache Get contention with and without LRU access tracking
+    desc: Measure production MemoryCache Get contention across same and distinct keys
     cmds:
       - go test -run '^$' -bench '^BenchmarkMemoryCacheGetContention$' -benchmem -benchtime=3s -count=3 ./internal/cache
 
   bench:cleanup:
-    desc: Measure background cleanup scan, expiration removal, and worst-case Get/Set contention
+    desc: Measure production background cleanup and worst-case Get/Set contention
     cmds:
       - go test -run '^$' -bench '^BenchmarkMemoryCache.*Cleanup' -benchmem -benchtime=3s -count=3 ./internal/cache
 
