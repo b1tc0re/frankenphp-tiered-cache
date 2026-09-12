@@ -1,17 +1,6 @@
 package cache
 
-import (
-	"reflect"
-	"time"
-)
-
-type expirationScanner struct {
-	iterator *reflect.MapIter
-}
-
-func (s *expirationScanner) reset() {
-	s.iterator = nil
-}
+import "time"
 
 type expirationCandidate struct {
 	key   string
@@ -30,26 +19,19 @@ func (c *MemoryCache) purgeExpiredSample(shard *memoryShard, now time.Time, samp
 	}
 
 	shard.mu.RLock()
-	if shard.cleanup.iterator == nil {
-		shard.cleanup.iterator = reflect.ValueOf(shard.entries).MapRange()
-	}
-
 	sampled := 0
-	for sampled < sampleSize {
-		if !shard.cleanup.iterator.Next() {
-			shard.cleanup.reset()
-			break
-		}
-
-		key := shard.cleanup.iterator.Key().String()
-		entry := shard.cleanup.iterator.Value().Interface().(*memoryEntry)
+	for key, entry := range shard.entries {
 		if isExpired(entry.expiresAt, now) {
 			candidates = append(candidates, expirationCandidate{
 				key:   key,
 				entry: entry,
 			})
 		}
+
 		sampled++
+		if sampled >= sampleSize {
+			break
+		}
 	}
 	shard.mu.RUnlock()
 
