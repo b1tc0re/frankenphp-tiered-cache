@@ -425,6 +425,7 @@ func (c *MemoryCache) evictOneLRU() bool {
 				break
 			}
 		}
+	}
 
 	if oldest == nil {
 		return false
