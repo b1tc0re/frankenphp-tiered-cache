@@ -5,26 +5,40 @@ import (
 	"time"
 )
 
-func TestMemoryCacheTouchUpdatesLastAccess(t *testing.T) {
+func TestMemoryCacheGetMissDoesNotReadClock(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache.now = func() time.Time {
+		t.Fatal("Get() read clock for a missing key")
+		return time.Time{}
+	}
+
+	value, err := cache.Get("missing")
+	if err != nil || value != nil {
+		t.Fatalf("Get(missing) = %q, %v; want nil, nil", value, err)
+	}
+}
+
+func TestMemoryCacheTouchUsesCurrentTimeForNewDeadline(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
 	mustSet(t, cache, "key", []byte("value"), time.Minute)
-	entry := cache.shardFor("key").entries["key"]
-	initialLastAccess := entry.lastAccess.Load()
+	now = time.Unix(150, 0)
 
-	now = now.Add(30 * time.Second)
-	clock := cache.lruClock.Add(1)
 	touched, err := cache.Touch("key", time.Minute)
 	if err != nil || !touched {
 		t.Fatalf("Touch() = %v, %v; want true, nil", touched, err)
 	}
-	if got := entry.lastAccess.Load(); got != clock {
-		t.Fatalf("lastAccess = %d, want %d", got, clock)
-	}
-	if entry.lastAccess.Load() <= initialLastAccess {
-		t.Fatal("Touch() did not advance lastAccess")
+
+	shard := cache.shardFor("key")
+	shard.mu.RLock()
+	expiresAt := shard.entries["key"].expiresAt
+	shard.mu.RUnlock()
+
+	want := time.Unix(210, 0)
+	if !expiresAt.Equal(want) {
+		t.Fatalf("expiresAt = %v, want %v", expiresAt, want)
 	}
 }
 

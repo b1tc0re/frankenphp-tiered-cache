@@ -8,7 +8,6 @@ import (
 
 func TestMemoryCachePurgeExpiredShardOnlyCleansTargetShard(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
-	stopMemoryCacheMaintenanceForTest(cache)
 
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
@@ -42,7 +41,6 @@ func TestMemoryCachePurgeExpiredShardOnlyCleansTargetShard(t *testing.T) {
 	}
 
 	cache.purgeExpiredShard(&cache.shards[1], now)
-
 	if memoryShardHasKey(&cache.shards[1], expiredShard1) {
 		t.Fatal("expired entry in second cleaned shard was not removed")
 	}
@@ -53,7 +51,6 @@ func TestMemoryCachePurgeExpiredShardOnlyCleansTargetShard(t *testing.T) {
 
 func TestMemoryCachePurgeExpiredSampleIsBounded(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
-	stopMemoryCacheMaintenanceForTest(cache)
 
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
@@ -87,9 +84,108 @@ func TestMemoryCachePurgeExpiredSampleIsBounded(t *testing.T) {
 	}
 }
 
+func TestMemoryCacheBackgroundCleanupAdvancesAcrossShardBatches(t *testing.T) {
+	cache, err := newMemoryCache(MemoryConfig{}, defaultShardCount, defaultLRUSamples)
+	if err != nil {
+		t.Fatalf("NewMemoryCache() error = %v", err)
+	}
+	stopMemoryCacheMaintenanceForTest(cache)
+	t.Cleanup(func() {
+		if err := cache.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+
+	now := time.Unix(100, 0)
+	cache.now = func() time.Time { return now }
+
+	keys := make([]string, len(cache.shards))
+	for shardIndex := range cache.shards {
+		key := keyForMemoryShard(t, cache, shardIndex, "batch")
+		keys[shardIndex] = key
+		mustSet(t, cache, key, []byte("value"), time.Second)
+	}
+
+	now = now.Add(2 * time.Second)
+	nextShard := 0
+
+	for batch := 0; batch < defaultShardCount/backgroundCleanupShardsPerTick; batch++ {
+		nextShard = cache.purgeExpiredBackgroundBatch(now, nextShard)
+
+		wantNext := ((batch + 1) * backgroundCleanupShardsPerTick) % len(cache.shards)
+		if nextShard != wantNext {
+			t.Fatalf("next shard after batch %d = %d, want %d", batch+1, nextShard, wantNext)
+		}
+
+		cleanedThrough := (batch + 1) * backgroundCleanupShardsPerTick
+		for shardIndex, key := range keys {
+			present := memoryShardHasKey(&cache.shards[shardIndex], key)
+			wantPresent := shardIndex >= cleanedThrough
+			if present != wantPresent {
+				t.Fatalf("entry in shard %d after batch %d present = %v, want %v", shardIndex, batch+1, present, wantPresent)
+			}
+		}
+	}
+
+	if nextShard != 0 {
+		t.Fatalf("next shard after full round = %d, want 0", nextShard)
+	}
+	if got := cache.current.Load(); got != 0 {
+		t.Fatalf("current bytes after full round = %d, want 0", got)
+	}
+}
+
+func TestMemoryCacheBackgroundCleanupScansSmallCacheOncePerTick(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{})
+	now := time.Unix(100, 0)
+	cache.now = func() time.Time { return now }
+
+	for shardIndex := range cache.shards {
+		key := keyForMemoryShard(t, cache, shardIndex, "small-batch")
+		mustSet(t, cache, key, []byte("value"), time.Second)
+	}
+
+	now = now.Add(2 * time.Second)
+	nextShard := cache.purgeExpiredBackgroundBatch(now, 0)
+
+	if nextShard != 0 {
+		t.Fatalf("next shard = %d, want 0", nextShard)
+	}
+	if got := cache.current.Load(); got != 0 {
+		t.Fatalf("current bytes = %d, want 0", got)
+	}
+}
+
+func TestNewMemoryCacheCloseStopsRunningMaintenance(t *testing.T) {
+	cache, err := NewMemoryCache(MemoryConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryCache() error = %v", err)
+	}
+
+	if err := cache.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case <-cache.maintenanceDone:
+	default:
+		t.Fatal("maintenance goroutine is still running after Close()")
+	}
+
+	if err := cache.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+func stopMemoryCacheMaintenanceForTest(cache *MemoryCache) {
+	cache.closeOnce.Do(func() {
+		close(cache.maintenanceStop)
+		<-cache.maintenanceDone
+	})
+}
+
 func keyForMemoryShard(t *testing.T, cache *MemoryCache, shardIndex int, prefix string) string {
 	t.Helper()
-
 	if shardIndex < 0 || shardIndex >= len(cache.shards) {
 		t.Fatalf("shard index %d out of range", shardIndex)
 	}
@@ -109,7 +205,6 @@ func keyForMemoryShard(t *testing.T, cache *MemoryCache, shardIndex int, prefix 
 func memoryShardHasKey(shard *memoryShard, key string) bool {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-
 	_, ok := shard.entries[key]
 	return ok
 }

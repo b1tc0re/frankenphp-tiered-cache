@@ -6,10 +6,31 @@ import (
 	"time"
 )
 
+func TestMemoryCacheTouchUpdatesLastAccess(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{})
+	now := time.Unix(100, 0)
+	cache.now = func() time.Time { return now }
+
+	mustSet(t, cache, "key", []byte("value"), time.Minute)
+	entry := cache.shardFor("key").entries["key"]
+	initialLastAccess := entry.lastAccess.Load()
+
+	now = now.Add(30 * time.Second)
+	clock := cache.lruClock.Add(1)
+	touched, err := cache.Touch("key", time.Minute)
+	if err != nil || !touched {
+		t.Fatalf("Touch() = %v, %v; want true, nil", touched, err)
+	}
+	if got := entry.lastAccess.Load(); got != clock {
+		t.Fatalf("lastAccess = %d, want %d", got, clock)
+	}
+	if entry.lastAccess.Load() <= initialLastAccess {
+		t.Fatal("Touch() did not advance lastAccess")
+	}
+}
+
 func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
-	stopMemoryCacheMaintenanceForTest(cache)
-
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -19,8 +40,6 @@ func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
 	}
 
 	clock := cache.lruClock.Add(1)
-
-	// Moving wall-clock time backwards must not affect local LRU ordering.
 	now = time.Unix(1, 0)
 	got, err := cache.Get("key")
 	if err != nil || got == nil {
@@ -43,7 +62,6 @@ func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
 
 func TestStoreMaxAccessClockDoesNotRegressWithConcurrentUpdates(t *testing.T) {
 	entry := &memoryEntry{}
-
 	lowReady := make(chan struct{})
 	releaseLow := make(chan struct{})
 	var wg sync.WaitGroup
@@ -64,7 +82,6 @@ func TestStoreMaxAccessClockDoesNotRegressWithConcurrentUpdates(t *testing.T) {
 	}()
 
 	wg.Wait()
-
 	if got := entry.lastAccess.Load(); got != 2 {
 		t.Fatalf("lastAccess = %d, want 2", got)
 	}
@@ -72,8 +89,6 @@ func TestStoreMaxAccessClockDoesNotRegressWithConcurrentUpdates(t *testing.T) {
 
 func TestMemoryCacheConcurrentGetsUseCurrentLRUClock(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{})
-	stopMemoryCacheMaintenanceForTest(cache)
-
 	mustForever(t, cache, "key", []byte("value"))
 	clock := cache.lruClock.Add(1)
 
@@ -106,31 +121,6 @@ func TestMemoryCacheConcurrentGetsUseCurrentLRUClock(t *testing.T) {
 	}
 }
 
-func TestMemoryCacheCloseStopsMaintenance(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
-
-	if err := cache.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-
-	select {
-	case <-cache.maintenanceDone:
-	default:
-		t.Fatal("maintenance goroutine is still running after Close()")
-	}
-
-	if err := cache.Close(); err != nil {
-		t.Fatalf("second Close() error = %v", err)
-	}
-}
-
-func stopMemoryCacheMaintenanceForTest(cache *MemoryCache) {
-	cache.closeOnce.Do(func() {
-		close(cache.maintenanceStop)
-		<-cache.maintenanceDone
-	})
-}
-
 func memoryEntryAccessClock(cache *MemoryCache, key string) uint64 {
 	shard := cache.shardFor(key)
 	shard.mu.RLock()
@@ -140,6 +130,5 @@ func memoryEntryAccessClock(cache *MemoryCache, key string) uint64 {
 	if entry == nil {
 		return 0
 	}
-
 	return entry.lastAccess.Load()
 }

@@ -8,10 +8,7 @@ import (
 )
 
 func TestMemoryCacheAccountingMatchesStoredEntriesAfterConcurrentAccess(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
-		MaxMemoryBytes:   1 << 20,
-		MaxItemSizeBytes: 16 << 10,
-	})
+	cache := newTestMemoryCache(t, MemoryConfig{MaxMemoryBytes: 1 << 20, MaxItemSizeBytes: 16 << 10})
 
 	var wg sync.WaitGroup
 	for worker := 0; worker < 32; worker++ {
@@ -22,7 +19,6 @@ func TestMemoryCacheAccountingMatchesStoredEntriesAfterConcurrentAccess(t *testi
 			for i := 0; i < 500; i++ {
 				key := fmt.Sprintf("accounting-%d-%d", worker, i%32)
 				value := []byte(fmt.Sprintf("value-%d-%d", worker, i))
-
 				if stored, err := cache.Set(key, value, time.Minute); err != nil || !stored {
 					t.Errorf("Set() = %v, %v", stored, err)
 					return
@@ -47,9 +43,38 @@ func TestMemoryCacheAccountingMatchesStoredEntriesAfterConcurrentAccess(t *testi
 		}
 		shard.mu.RUnlock()
 	}
-
 	if got := cache.current.Load(); got != accounted {
 		t.Fatalf("current bytes = %d, stored entry cost = %d", got, accounted)
+	}
+}
+
+func TestMemoryCacheFlushReplacesShardMap(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{})
+
+	mustForever(t, cache, "key", []byte("value"))
+	shard := cache.shardFor("key")
+	oldEntries := shard.entries
+
+	flushed, err := cache.Flush()
+	if err != nil || !flushed {
+		t.Fatalf("Flush() = %v, %v; want true, nil", flushed, err)
+	}
+
+	oldEntries["retained"] = &memoryEntry{}
+
+	shard.mu.RLock()
+	_, reusedOldMap := shard.entries["retained"]
+	entryCount := len(shard.entries)
+	shard.mu.RUnlock()
+
+	if reusedOldMap {
+		t.Fatal("Flush() reused the old shard map")
+	}
+	if entryCount != 0 {
+		t.Fatalf("new shard map contains %d entries, want 0", entryCount)
+	}
+	if got := cache.current.Load(); got != 0 {
+		t.Fatalf("current bytes = %d after Flush(), want 0", got)
 	}
 }
 
@@ -63,10 +88,7 @@ func TestMemoryConfigRejectsNegativeLimits(t *testing.T) {
 }
 
 func TestMemoryConfigRejectsItemLimitAboveMemoryLimit(t *testing.T) {
-	if _, err := (MemoryConfig{
-		MaxMemoryBytes:   1024,
-		MaxItemSizeBytes: 2048,
-	}).normalized(); err == nil {
+	if _, err := (MemoryConfig{MaxMemoryBytes: 1024, MaxItemSizeBytes: 2048}).normalized(); err == nil {
 		t.Fatal("max item size above max memory was accepted")
 	}
 }
