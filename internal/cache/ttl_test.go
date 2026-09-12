@@ -15,15 +15,16 @@ func TestMemoryCacheTouchUpdatesLastAccess(t *testing.T) {
 	initialLastAccess := entry.lastAccess.Load()
 
 	now = now.Add(30 * time.Second)
+	clock := cache.lruClock.Add(1)
 	touched, err := cache.Touch("key", time.Minute)
 	if err != nil || !touched {
 		t.Fatalf("Touch() = %v, %v; want true, nil", touched, err)
 	}
-	if got := entry.lastAccess.Load(); got <= initialLastAccess {
-		t.Fatalf("lastAccess = %d, want greater than %d", got, initialLastAccess)
+	if got := entry.lastAccess.Load(); got != clock {
+		t.Fatalf("lastAccess = %d, want %d", got, clock)
 	}
-	if got := entry.lastAccess.Load(); got != cache.accessSeq.Load() {
-		t.Fatalf("lastAccess = %d, access sequence = %d; want equal", got, cache.accessSeq.Load())
+	if entry.lastAccess.Load() <= initialLastAccess {
+		t.Fatal("Touch() did not advance lastAccess")
 	}
 }
 
