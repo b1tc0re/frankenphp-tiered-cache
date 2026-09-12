@@ -262,6 +262,7 @@ func resetCleanupExpiredBenchShards(shards []memoryShard, now time.Time, expired
 			entries[key] = entry
 			totalCost += entry.cost
 		}
+		shards[i].cleanup.reset()
 		shards[i].entries = entries
 	}
 
