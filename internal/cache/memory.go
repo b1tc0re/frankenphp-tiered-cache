@@ -25,7 +25,6 @@ type memoryEntry struct {
 type memoryShard struct {
 	mu      sync.RWMutex
 	entries map[string]*memoryEntry
-	cleanup expirationScanner
 }
 
 type MemoryCache struct {
@@ -191,7 +190,6 @@ func (c *MemoryCache) Flush() (bool, error) {
 
 	for i := range c.shards {
 		clear(c.shards[i].entries)
-		c.shards[i].cleanup.reset()
 	}
 	c.current.Store(0)
 
@@ -367,7 +365,6 @@ func (c *MemoryCache) purgeExpiredShard(shard *memoryShard, now time.Time) {
 			c.current.Add(-entry.cost)
 		}
 	}
-	shard.cleanup.reset()
 	shard.mu.Unlock()
 }
 
