@@ -195,7 +195,7 @@ func newMemoryBenchCache(t *testing.T) *MemoryCache {
 
 	cache, err := NewMemoryCache(MemoryConfig{
 		MaxMemoryBytes:   memoryBenchLimitBytes,
-		MaxItemSizeBytes: DefaultMaxItemSizeBytes,
+		MaxItemSizeBytes: 8 << 20,
 	})
 	if err != nil {
 		t.Fatalf("NewMemoryCache() error = %v", err)
