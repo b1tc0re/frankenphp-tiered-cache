@@ -217,6 +217,7 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt time.Time) (bool, 
 	if cost > c.maxItemSize {
 		return false, fmt.Errorf(
 			"%w: item size %d bytes exceeds limit %d bytes",
+			ErrItemTooLarge,
 			cost,
 			c.maxItemSize,
 		)
@@ -424,7 +425,6 @@ func (c *MemoryCache) evictOneLRU() bool {
 				break
 			}
 		}
-	}
 
 	if oldest == nil {
 		return false
