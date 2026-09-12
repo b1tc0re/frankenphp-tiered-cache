@@ -35,17 +35,17 @@ tasks:
   bench:get:
     desc: Measure production MemoryCache Get contention across same and distinct keys
     cmds:
-      - go test -run '^$' -bench '^BenchmarkMemoryCacheGetContention$' -benchmem -benchtime=3s -count=3 ./internal/cache
+      - go test -run '^$' -bench '^BenchmarkMemoryCacheGetContention$' -benchmem -benchtime=3s -count=3 ./internal/cache/memory
 
   bench:cleanup:
     desc: Measure production background cleanup and worst-case Get/Set contention
     cmds:
-      - go test -run '^$' -bench '^BenchmarkMemoryCache.*Cleanup' -benchmem -benchtime=3s -count=3 ./internal/cache
+      - go test -run '^$' -bench '^BenchmarkMemoryCache.*Cleanup' -benchmem -benchtime=3s -count=3 ./internal/cache/memory
 
   bench:memory:
     desc: Measure MemoryCache accounting, Go heap, and process RSS
     cmds:
-      - MEMORY_BENCH=1 go test -run '^TestMemoryCacheMemory' -count=1 -v ./internal/cache
+      - MEMORY_BENCH=1 go test -run '^TestMemoryCacheMemory' -count=1 -v ./internal/cache/memory
 
   mod:tidy:
     desc: Synchronize go.mod and go.sum with the source code

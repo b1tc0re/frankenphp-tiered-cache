@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestMemoryCachePurgeExpiredShardOnlyCleansTargetShard(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
@@ -50,7 +50,7 @@ func TestMemoryCachePurgeExpiredShardOnlyCleansTargetShard(t *testing.T) {
 }
 
 func TestMemoryCachePurgeExpiredSampleIsBounded(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
@@ -85,9 +85,9 @@ func TestMemoryCachePurgeExpiredSampleIsBounded(t *testing.T) {
 }
 
 func TestMemoryCacheBackgroundCleanupAdvancesAcrossShardBatches(t *testing.T) {
-	cache, err := newMemoryCache(MemoryConfig{}, defaultShardCount, defaultLRUSamples)
+	cache, err := newMemoryCache(Config{}, defaultShardCount, defaultLRUSamples)
 	if err != nil {
-		t.Fatalf("NewMemoryCache() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 	stopMemoryCacheMaintenanceForTest(cache)
 	t.Cleanup(func() {
@@ -136,7 +136,7 @@ func TestMemoryCacheBackgroundCleanupAdvancesAcrossShardBatches(t *testing.T) {
 }
 
 func TestMemoryCacheBackgroundCleanupScansSmallCacheOncePerTick(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -156,10 +156,10 @@ func TestMemoryCacheBackgroundCleanupScansSmallCacheOncePerTick(t *testing.T) {
 	}
 }
 
-func TestNewMemoryCacheCloseStopsRunningMaintenance(t *testing.T) {
-	cache, err := NewMemoryCache(MemoryConfig{})
+func TestNewCloseStopsRunningMaintenance(t *testing.T) {
+	cache, err := New(Config{})
 	if err != nil {
-		t.Fatalf("NewMemoryCache() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 
 	if err := cache.Close(); err != nil {

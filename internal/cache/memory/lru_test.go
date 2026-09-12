@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"sync"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestMemoryCacheTouchUpdatesLastAccess(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -30,7 +30,7 @@ func TestMemoryCacheTouchUpdatesLastAccess(t *testing.T) {
 }
 
 func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -88,7 +88,7 @@ func TestStoreMaxAccessClockDoesNotRegressWithConcurrentUpdates(t *testing.T) {
 }
 
 func TestMemoryCacheConcurrentGetsUseCurrentLRUClock(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	mustForever(t, cache, "key", []byte("value"))
 	clock := cache.lruClock.Add(1)
 

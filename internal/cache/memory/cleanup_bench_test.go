@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"fmt"
@@ -148,12 +148,12 @@ func benchmarkMemoryCacheCleanupContention(b *testing.B, set bool) {
 func newCleanupBenchCache(b *testing.B) *MemoryCache {
 	b.Helper()
 
-	cache, err := NewMemoryCache(MemoryConfig{
+	cache, err := New(Config{
 		MaxMemoryBytes:   128 << 20,
 		MaxItemSizeBytes: 4 << 20,
 	})
 	if err != nil {
-		b.Fatalf("NewMemoryCache() error = %v", err)
+		b.Fatalf("New() error = %v", err)
 	}
 	stopMemoryCacheMaintenanceForTest(cache)
 	b.Cleanup(func() {

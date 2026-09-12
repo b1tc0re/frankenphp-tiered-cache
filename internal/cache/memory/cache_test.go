@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"bytes"
@@ -7,10 +7,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 )
 
 func TestMemoryCacheGetMissReturnsNil(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
 	got, err := cache.Get("missing")
 	if err != nil {
@@ -22,7 +24,7 @@ func TestMemoryCacheGetMissReturnsNil(t *testing.T) {
 }
 
 func TestMemoryCacheSetGetZeroCopy(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	value := []byte("hello")
 
 	stored, err := cache.Set("key", value, time.Minute)
@@ -46,7 +48,7 @@ func TestMemoryCacheSetGetZeroCopy(t *testing.T) {
 }
 
 func TestMemoryCacheAllowsEmptyNonNilValue(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	value := make([]byte, 0)
 
 	stored, err := cache.Set("key", value, time.Minute)
@@ -67,7 +69,7 @@ func TestMemoryCacheAllowsEmptyNonNilValue(t *testing.T) {
 }
 
 func TestMemoryCacheExpiration(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -87,7 +89,7 @@ func TestMemoryCacheExpiration(t *testing.T) {
 }
 
 func TestMemoryCacheForever(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -104,7 +106,7 @@ func TestMemoryCacheForever(t *testing.T) {
 }
 
 func TestMemoryCacheForgetReturnsStatus(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
 	removed, err := cache.Forget("missing")
 	if err != nil || removed {
@@ -124,7 +126,7 @@ func TestMemoryCacheForgetReturnsStatus(t *testing.T) {
 }
 
 func TestMemoryCacheForgetExpiredReturnsFalse(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -141,7 +143,7 @@ func TestMemoryCacheForgetExpiredReturnsFalse(t *testing.T) {
 }
 
 func TestMemoryCacheTouchReturnsStatus(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -172,7 +174,7 @@ func TestMemoryCacheTouchReturnsStatus(t *testing.T) {
 }
 
 func TestMemoryCacheTouchExpiredReturnsFalse(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -186,7 +188,7 @@ func TestMemoryCacheTouchExpiredReturnsFalse(t *testing.T) {
 }
 
 func TestMemoryCacheFlush(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	mustForever(t, cache, "a", []byte("1"))
 	mustForever(t, cache, "b", []byte("2"))
 
@@ -212,41 +214,41 @@ func TestMemoryCacheFlush(t *testing.T) {
 }
 
 func TestMemoryCacheRejectsInvalidTTL(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
-	if stored, err := cache.Set("key", []byte("value"), 0); stored || !errors.Is(err, ErrInvalidTTL) {
+	if stored, err := cache.Set("key", []byte("value"), 0); stored || !errors.Is(err, cachecontract.ErrInvalidTTL) {
 		t.Fatalf("Set() = %v, %v; want false, ErrInvalidTTL", stored, err)
 	}
-	if touched, err := cache.Touch("key", -time.Second); touched || !errors.Is(err, ErrInvalidTTL) {
+	if touched, err := cache.Touch("key", -time.Second); touched || !errors.Is(err, cachecontract.ErrInvalidTTL) {
 		t.Fatalf("Touch() = %v, %v; want false, ErrInvalidTTL", touched, err)
 	}
 }
 
 func TestMemoryCacheRejectsNilValue(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
-	if stored, err := cache.Set("key", nil, time.Minute); stored || !errors.Is(err, ErrNilValue) {
+	if stored, err := cache.Set("key", nil, time.Minute); stored || !errors.Is(err, cachecontract.ErrNilValue) {
 		t.Fatalf("Set(nil) = %v, %v; want false, ErrNilValue", stored, err)
 	}
-	if stored, err := cache.Forever("key", nil); stored || !errors.Is(err, ErrNilValue) {
+	if stored, err := cache.Forever("key", nil); stored || !errors.Is(err, cachecontract.ErrNilValue) {
 		t.Fatalf("Forever(nil) = %v, %v; want false, ErrNilValue", stored, err)
 	}
 }
 
 func TestMemoryCacheRejectsOversizedItem(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   1024,
 		MaxItemSizeBytes: 256,
 	})
 
 	stored, err := cache.Forever("key", make([]byte, 254))
-	if stored || !errors.Is(err, ErrItemTooLarge) {
+	if stored || !errors.Is(err, cachecontract.ErrItemTooLarge) {
 		t.Fatalf("Forever(oversized) = %v, %v; want false, ErrItemTooLarge", stored, err)
 	}
 }
 
 func TestMemoryCacheAllowsItemAtExactSizeLimit(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   1024,
 		MaxItemSizeBytes: 256,
 	})
@@ -258,7 +260,7 @@ func TestMemoryCacheAllowsItemAtExactSizeLimit(t *testing.T) {
 }
 
 func TestMemoryCacheAccountsRetainedCapacity(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   2048,
 		MaxItemSizeBytes: 2048,
 	})
@@ -274,7 +276,7 @@ func TestMemoryCacheAccountsRetainedCapacity(t *testing.T) {
 }
 
 func TestMemoryCacheEvictsToStayWithinBudget(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   1024,
 		MaxItemSizeBytes: 512,
 	})
@@ -300,7 +302,7 @@ func TestMemoryCacheEvictsToStayWithinBudget(t *testing.T) {
 }
 
 func TestMemoryCachePurgesExpiredBeforeLiveEntries(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   700,
 		MaxItemSizeBytes: 300,
 	})
@@ -326,7 +328,7 @@ func TestMemoryCachePurgesExpiredBeforeLiveEntries(t *testing.T) {
 }
 
 func TestMemoryCacheReplacementAccounting(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   2048,
 		MaxItemSizeBytes: 1024,
 	})
@@ -348,7 +350,7 @@ func TestMemoryCacheReplacementAccounting(t *testing.T) {
 }
 
 func TestMemoryCacheConcurrentAccess(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   1 << 20,
 		MaxItemSizeBytes: 16 << 10,
 	})
@@ -393,8 +395,8 @@ func TestMemoryCacheConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestMemoryConfigDefaults(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+func TestConfigDefaults(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
 
 	if cache.maxMemory != DefaultMaxMemoryBytes {
 		t.Fatalf("max memory = %d, want %d", cache.maxMemory, DefaultMaxMemoryBytes)
@@ -420,12 +422,12 @@ func mustForever(t *testing.T, cache *MemoryCache, key string, value []byte) {
 	}
 }
 
-func newTestMemoryCache(t *testing.T, config MemoryConfig) *MemoryCache {
+func newTestMemoryCache(t *testing.T, config Config) *MemoryCache {
 	t.Helper()
 
 	cache, err := newMemoryCache(config, 8, 5)
 	if err != nil {
-		t.Fatalf("NewMemoryCache() error = %v", err)
+		t.Fatalf("newMemoryCache() error = %v", err)
 	}
 	stopMemoryCacheMaintenanceForTest(cache)
 	t.Cleanup(func() {

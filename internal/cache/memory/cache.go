@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 )
 
 const (
@@ -43,13 +45,13 @@ type MemoryCache struct {
 	closeOnce       sync.Once
 }
 
-var _ Cache = (*MemoryCache)(nil)
+var _ cachecontract.Cache = (*MemoryCache)(nil)
 
-func NewMemoryCache(config MemoryConfig) (*MemoryCache, error) {
+func New(config Config) (*MemoryCache, error) {
 	return newMemoryCache(config, defaultShardCount, defaultLRUSamples)
 }
 
-func newMemoryCache(config MemoryConfig, shardCount, lruSamples int) (*MemoryCache, error) {
+func newMemoryCache(config Config, shardCount, lruSamples int) (*MemoryCache, error) {
 	cfg, err := config.normalized()
 	if err != nil {
 		return nil, err
@@ -111,10 +113,10 @@ func (c *MemoryCache) Get(key string) ([]byte, error) {
 // read-only ownership of value to the cache while the entry remains reachable.
 func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
-		return false, ErrInvalidTTL
+		return false, cachecontract.ErrInvalidTTL
 	}
 	if value == nil {
-		return false, ErrNilValue
+		return false, cachecontract.ErrNilValue
 	}
 	return c.set(key, value, ttl, false)
 }
@@ -122,7 +124,7 @@ func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 // Forever stores value without expiration and without copying it.
 func (c *MemoryCache) Forever(key string, value []byte) (bool, error) {
 	if value == nil {
-		return false, ErrNilValue
+		return false, cachecontract.ErrNilValue
 	}
 	return c.set(key, value, 0, true)
 }
@@ -149,7 +151,7 @@ func (c *MemoryCache) Forget(key string) (bool, error) {
 // Touch updates the TTL and access order of a live key. It returns false when the key is missing or expired.
 func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
-		return false, ErrInvalidTTL
+		return false, cachecontract.ErrInvalidTTL
 	}
 
 	shard := c.shardFor(key)
@@ -206,7 +208,7 @@ func (c *MemoryCache) set(key string, value []byte, ttl time.Duration, forever b
 	if cost > c.maxItemSize {
 		return false, fmt.Errorf(
 			"%w: item size %d bytes exceeds limit %d bytes",
-			ErrItemTooLarge,
+			cachecontract.ErrItemTooLarge,
 			cost,
 			c.maxItemSize,
 		)

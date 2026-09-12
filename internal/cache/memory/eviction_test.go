@@ -1,9 +1,9 @@
-package cache
+package memory
 
 import "testing"
 
 func TestMemoryCacheStaleEvictionCandidateDoesNotRemoveReplacement(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   1024,
 		MaxItemSizeBytes: 1024,
 	})
@@ -42,7 +42,7 @@ func TestMemoryCacheStaleEvictionCandidateDoesNotRemoveReplacement(t *testing.T)
 }
 
 func TestMemoryCacheEvictionCandidateReportsActualDeletion(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{
+	cache := newTestMemoryCache(t, Config{
 		MaxMemoryBytes:   1024,
 		MaxItemSizeBytes: 1024,
 	})

@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"os"
@@ -193,12 +193,12 @@ func requireMemoryBench(t *testing.T) {
 func newMemoryBenchCache(t *testing.T) *MemoryCache {
 	t.Helper()
 
-	cache, err := NewMemoryCache(MemoryConfig{
+	cache, err := New(Config{
 		MaxMemoryBytes:   memoryBenchLimitBytes,
 		MaxItemSizeBytes: 8 << 20,
 	})
 	if err != nil {
-		t.Fatalf("NewMemoryCache() error = %v", err)
+		t.Fatalf("New() error = %v", err)
 	}
 	t.Cleanup(func() {
 		if err := cache.Close(); err != nil {

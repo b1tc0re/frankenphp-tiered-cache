@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 )
 
 func TestMemoryCacheGetMissDoesNotReadClock(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	cache.now = func() time.Time {
 		t.Fatal("Get() read clock for a missing key")
 		return time.Time{}
@@ -19,7 +19,7 @@ func TestMemoryCacheGetMissDoesNotReadClock(t *testing.T) {
 }
 
 func TestMemoryCacheTouchUsesCurrentTimeForNewDeadline(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -43,7 +43,7 @@ func TestMemoryCacheTouchUsesCurrentTimeForNewDeadline(t *testing.T) {
 }
 
 func TestMemoryCacheForeverReplacesExpiringEntry(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 
@@ -62,7 +62,7 @@ func TestMemoryCacheForeverReplacesExpiringEntry(t *testing.T) {
 }
 
 func TestMemoryCacheSetReplacesForeverEntryWithExpiration(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 	now := time.Unix(100, 0)
 	cache.now = func() time.Time { return now }
 

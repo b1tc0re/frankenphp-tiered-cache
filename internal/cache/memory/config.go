@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import "fmt"
 
@@ -11,17 +11,17 @@ const (
 	evictionTargetPct = 95
 )
 
-type MemoryConfig struct {
+type Config struct {
 	MaxMemoryBytes   int64
 	MaxItemSizeBytes int64
 }
 
-func (c MemoryConfig) normalized() (MemoryConfig, error) {
+func (c Config) normalized() (Config, error) {
 	if c.MaxMemoryBytes < 0 {
-		return MemoryConfig{}, fmt.Errorf("cache: max memory must not be negative")
+		return Config{}, fmt.Errorf("cache: max memory must not be negative")
 	}
 	if c.MaxItemSizeBytes < 0 {
-		return MemoryConfig{}, fmt.Errorf("cache: max item size must not be negative")
+		return Config{}, fmt.Errorf("cache: max item size must not be negative")
 	}
 
 	if c.MaxMemoryBytes == 0 {
@@ -37,7 +37,7 @@ func (c MemoryConfig) normalized() (MemoryConfig, error) {
 	}
 
 	if explicitItemLimit && c.MaxItemSizeBytes > c.MaxMemoryBytes {
-		return MemoryConfig{}, fmt.Errorf("cache: max item size must not exceed max memory")
+		return Config{}, fmt.Errorf("cache: max item size must not exceed max memory")
 	}
 
 	return c, nil

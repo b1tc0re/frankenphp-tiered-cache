@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"fmt"
@@ -24,9 +24,9 @@ func BenchmarkMemoryCacheGetContention(b *testing.B) {
 func benchmarkMemoryCacheGet(b *testing.B, workers int, distinctKeys bool) {
 	b.Helper()
 
-	cache, err := NewMemoryCache(MemoryConfig{})
+	cache, err := New(Config{})
 	if err != nil {
-		b.Fatalf("NewMemoryCache() error = %v", err)
+		b.Fatalf("New() error = %v", err)
 	}
 	defer func() {
 		if err := cache.Close(); err != nil {

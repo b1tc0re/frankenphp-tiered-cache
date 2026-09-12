@@ -1,4 +1,4 @@
-package cache
+package memory
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestMemoryCacheAccountingMatchesStoredEntriesAfterConcurrentAccess(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{MaxMemoryBytes: 1 << 20, MaxItemSizeBytes: 16 << 10})
+	cache := newTestMemoryCache(t, Config{MaxMemoryBytes: 1 << 20, MaxItemSizeBytes: 16 << 10})
 
 	var wg sync.WaitGroup
 	for worker := 0; worker < 32; worker++ {
@@ -49,7 +49,7 @@ func TestMemoryCacheAccountingMatchesStoredEntriesAfterConcurrentAccess(t *testi
 }
 
 func TestMemoryCacheFlushReplacesShardMap(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
+	cache := newTestMemoryCache(t, Config{})
 
 	mustForever(t, cache, "key", []byte("value"))
 	shard := cache.shardFor("key")
@@ -78,23 +78,23 @@ func TestMemoryCacheFlushReplacesShardMap(t *testing.T) {
 	}
 }
 
-func TestMemoryConfigRejectsNegativeLimits(t *testing.T) {
-	if _, err := (MemoryConfig{MaxMemoryBytes: -1}).normalized(); err == nil {
+func TestConfigRejectsNegativeLimits(t *testing.T) {
+	if _, err := (Config{MaxMemoryBytes: -1}).normalized(); err == nil {
 		t.Fatal("negative max memory was accepted")
 	}
-	if _, err := (MemoryConfig{MaxItemSizeBytes: -1}).normalized(); err == nil {
+	if _, err := (Config{MaxItemSizeBytes: -1}).normalized(); err == nil {
 		t.Fatal("negative max item size was accepted")
 	}
 }
 
-func TestMemoryConfigRejectsItemLimitAboveMemoryLimit(t *testing.T) {
-	if _, err := (MemoryConfig{MaxMemoryBytes: 1024, MaxItemSizeBytes: 2048}).normalized(); err == nil {
+func TestConfigRejectsItemLimitAboveMemoryLimit(t *testing.T) {
+	if _, err := (Config{MaxMemoryBytes: 1024, MaxItemSizeBytes: 2048}).normalized(); err == nil {
 		t.Fatal("max item size above max memory was accepted")
 	}
 }
 
-func TestMemoryConfigClampsDefaultItemLimitToMemoryLimit(t *testing.T) {
-	cfg, err := (MemoryConfig{MaxMemoryBytes: 1024}).normalized()
+func TestConfigClampsDefaultItemLimitToMemoryLimit(t *testing.T) {
+	cfg, err := (Config{MaxMemoryBytes: 1024}).normalized()
 	if err != nil {
 		t.Fatalf("normalized() error = %v", err)
 	}
