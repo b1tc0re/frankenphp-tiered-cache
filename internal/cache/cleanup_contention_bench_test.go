@@ -59,12 +59,13 @@ func BenchmarkMemoryCacheSetWithBackgroundCleanup(b *testing.B) {
 				go func() {
 					defer wg.Done()
 					shard := &cache.shards[0]
+					now := time.Now()
 					for {
 						select {
 						case <-stop:
 							return
 						default:
-							cache.purgeExpiredSample(shard, time.Now(), tc.sampleSize)
+							cache.purgeExpiredSample(shard, now, tc.sampleSize)
 						}
 					}
 				}()
