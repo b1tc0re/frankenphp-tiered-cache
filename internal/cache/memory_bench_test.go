@@ -200,6 +200,11 @@ func newMemoryBenchCache(t *testing.T) *MemoryCache {
 	if err != nil {
 		t.Fatalf("NewMemoryCache() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := cache.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 
 	return cache
 }
