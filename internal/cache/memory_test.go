@@ -382,6 +382,7 @@ func TestMemoryCacheConcurrentAccess(t *testing.T) {
 						t.Errorf("Forget() error = %v", err)
 						return
 					}
+				}
 			}
 		}()
 	}
