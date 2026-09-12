@@ -13,7 +13,7 @@ const lruClockResolution = time.Second
 
 type memoryEntry struct {
 	value      []byte
-	expiresAt  int64
+	expiresAt  time.Time
 	lastAccess atomic.Uint64
 	cost       int64
 }
@@ -82,7 +82,7 @@ func newMemoryCache(config MemoryConfig, shardCount, lruSamples int) (*MemoryCac
 // means cache miss. Returned bytes are read-only and must not be modified.
 func (c *MemoryCache) Get(key string) ([]byte, error) {
 	shard := c.shardFor(key)
-	now := c.now().UnixNano()
+	now := c.now()
 
 	shard.mu.RLock()
 	entry, ok := shard.entries[key]
@@ -90,7 +90,7 @@ func (c *MemoryCache) Get(key string) ([]byte, error) {
 		shard.mu.RUnlock()
 		return nil, nil
 	}
-	if entry.expiresAt > 0 && entry.expiresAt <= now {
+	if isExpired(entry.expiresAt, now) {
 		shard.mu.RUnlock()
 		c.deleteExpired(shard, key, entry, now)
 		return nil, nil
@@ -113,7 +113,7 @@ func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 		return false, ErrNilValue
 	}
 
-	return c.set(key, value, c.now().Add(ttl).UnixNano())
+	return c.set(key, value, c.now().Add(ttl))
 }
 
 // Forever stores value without expiration and without copying it.
@@ -122,13 +122,13 @@ func (c *MemoryCache) Forever(key string, value []byte) (bool, error) {
 		return false, ErrNilValue
 	}
 
-	return c.set(key, value, 0)
+	return c.set(key, value, time.Time{})
 }
 
 // Forget removes a live key. It returns false when the key is missing or has expired.
 func (c *MemoryCache) Forget(key string) (bool, error) {
 	shard := c.shardFor(key)
-	now := c.now().UnixNano()
+	now := c.now()
 
 	shard.mu.Lock()
 	entry, ok := shard.entries[key]
@@ -139,7 +139,7 @@ func (c *MemoryCache) Forget(key string) (bool, error) {
 
 	delete(shard.entries, key)
 	c.current.Add(-entry.cost)
-	expired := entry.expiresAt > 0 && entry.expiresAt <= now
+	expired := isExpired(entry.expiresAt, now)
 	shard.mu.Unlock()
 
 	return !expired, nil
@@ -152,9 +152,8 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	now := c.now()
-	nowUnixNano := now.UnixNano()
 	shard := c.shardFor(key)
-	expiresAt := now.Add(ttl).UnixNano()
+	expiresAt := now.Add(ttl)
 
 	shard.mu.Lock()
 	entry, ok := shard.entries[key]
@@ -162,7 +161,7 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 		shard.mu.Unlock()
 		return false, nil
 	}
-	if entry.expiresAt > 0 && entry.expiresAt <= nowUnixNano {
+	if isExpired(entry.expiresAt, now) {
 		delete(shard.entries, key)
 		c.current.Add(-entry.cost)
 		shard.mu.Unlock()
@@ -207,7 +206,7 @@ func (c *MemoryCache) Close() error {
 	return nil
 }
 
-func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, error) {
+func (c *MemoryCache) set(key string, value []byte, expiresAt time.Time) (bool, error) {
 	cost := itemCost(key, value)
 	if cost > c.maxItemSize {
 		return false, fmt.Errorf(
@@ -307,7 +306,7 @@ func (c *MemoryCache) evictFor(required int64) bool {
 		return true
 	}
 
-	now := c.now().UnixNano()
+	now := c.now()
 	c.purgeExpired(now)
 
 	target := c.maxMemory - required
@@ -328,12 +327,12 @@ func (c *MemoryCache) evictFor(required int64) bool {
 	return c.current.Load()+required <= c.maxMemory
 }
 
-func (c *MemoryCache) purgeExpired(now int64) {
+func (c *MemoryCache) purgeExpired(now time.Time) {
 	for i := range c.shards {
 		shard := &c.shards[i]
 		shard.mu.Lock()
 		for key, entry := range shard.entries {
-			if entry.expiresAt > 0 && entry.expiresAt <= now {
+			if isExpired(entry.expiresAt, now) {
 				delete(shard.entries, key)
 				c.current.Add(-entry.cost)
 			}
@@ -415,10 +414,10 @@ func (c *MemoryCache) evictOneLRU() bool {
 	return true
 }
 
-func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *memoryEntry, now int64) {
+func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *memoryEntry, now time.Time) {
 	shard.mu.Lock()
 	current, ok := shard.entries[key]
-	if ok && current == expected && current.expiresAt > 0 && current.expiresAt <= now {
+	if ok && current == expected && isExpired(current.expiresAt, now) {
 		delete(shard.entries, key)
 		c.current.Add(-current.cost)
 	}
@@ -428,6 +427,10 @@ func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *me
 func (c *MemoryCache) shardFor(key string) *memoryShard {
 	index := maphash.String(c.hashSeed, key) % uint64(len(c.shards))
 	return &c.shards[index]
+}
+
+func isExpired(expiresAt, now time.Time) bool {
+	return !expiresAt.IsZero() && !expiresAt.After(now)
 }
 
 func itemCost(key string, value []byte) int64 {
