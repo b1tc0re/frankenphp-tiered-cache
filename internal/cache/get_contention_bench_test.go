@@ -106,7 +106,7 @@ func benchmarkMemoryCacheGet(b *testing.B, workers int, distinctKeys, tracked bo
 // cost of coarse LRU access tracking.
 func memoryCacheGetWithoutAccessTracking(cache *MemoryCache, key string) ([]byte, error) {
 	shard := cache.shardFor(key)
-	now := cache.now().UnixNano()
+	now := cache.now()
 
 	shard.mu.RLock()
 	entry, ok := shard.entries[key]
@@ -114,7 +114,7 @@ func memoryCacheGetWithoutAccessTracking(cache *MemoryCache, key string) ([]byte
 		shard.mu.RUnlock()
 		return nil, nil
 	}
-	if entry.expiresAt > 0 && entry.expiresAt <= now {
+	if isExpired(entry.expiresAt, now) {
 		shard.mu.RUnlock()
 		cache.deleteExpired(shard, key, entry, now)
 		return nil, nil
