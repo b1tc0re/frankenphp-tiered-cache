@@ -84,7 +84,7 @@ func (c *MemoryCache) Get(key string) ([]byte, error) {
 		return nil, nil
 	}
 
-	entry.lastAccess.Store(c.accessSeq.Add(1))
+	c.recordAccess(entry)
 	value := entry.value
 	shard.mu.RUnlock()
 
@@ -158,7 +158,7 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	entry.expiresAt = expiresAt
-	entry.lastAccess.Store(c.accessSeq.Add(1))
+	c.recordAccess(entry)
 	shard.mu.Unlock()
 
 	return true, nil
@@ -214,7 +214,7 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, erro
 		delta := cost - oldCost
 
 		if delta <= 0 || c.tryReserve(delta) {
-			entry.lastAccess.Store(c.accessSeq.Add(1))
+			c.recordAccess(entry)
 			shard.entries[key] = entry
 			if delta < 0 {
 				c.current.Add(delta)
@@ -226,6 +226,23 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, erro
 
 		if !c.evictFor(delta) {
 			return false, nil
+		}
+	}
+}
+
+func (c *MemoryCache) recordAccess(entry *memoryEntry) {
+	sequence := c.accessSeq.Add(1)
+	storeMaxAccessSequence(entry, sequence)
+}
+
+func storeMaxAccessSequence(entry *memoryEntry, sequence uint64) {
+	for {
+		current := entry.lastAccess.Load()
+		if current >= sequence {
+			return
+		}
+		if entry.lastAccess.CompareAndSwap(current, sequence) {
+			return
 		}
 	}
 }
