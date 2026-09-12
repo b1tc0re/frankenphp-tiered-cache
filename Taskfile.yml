@@ -37,6 +37,11 @@ tasks:
     cmds:
       - go test -run '^$' -bench '^BenchmarkMemoryCacheGetContention$' -benchmem -benchtime=3s -count=3 ./internal/cache
 
+  bench:cleanup:
+    desc: Measure background cleanup scan cost and worst-case Set contention
+    cmds:
+      - go test -run '^$' -bench '^BenchmarkMemoryCache(BackgroundCleanupScan|SetWithBackgroundCleanup)$' -benchmem -benchtime=3s -count=3 ./internal/cache
+
   bench:memory:
     desc: Measure MemoryCache accounting, Go heap, and process RSS
     cmds:
