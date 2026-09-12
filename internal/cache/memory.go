@@ -204,7 +204,6 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, erro
 			expiresAt: expiresAt,
 			cost:      cost,
 		}
-		entry.lastAccess.Store(c.accessSeq.Add(1))
 
 		shard.mu.Lock()
 		old := shard.entries[key]
@@ -215,6 +214,7 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, erro
 		delta := cost - oldCost
 
 		if delta <= 0 || c.tryReserve(delta) {
+			entry.lastAccess.Store(c.accessSeq.Add(1))
 			shard.entries[key] = entry
 			if delta < 0 {
 				c.current.Add(delta)
