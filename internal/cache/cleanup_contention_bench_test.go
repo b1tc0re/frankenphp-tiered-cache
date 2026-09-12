@@ -40,7 +40,7 @@ func BenchmarkMemoryCacheBackgroundCleanupExpired(b *testing.B) {
 			cache := &MemoryCache{}
 			shards := make([]memoryShard, cleanupExpiredBenchBatchSize)
 			now := time.Now()
-			resetCleanupExpiredBenchShards(shards, now, expiredCount)
+			cache.current.Store(resetCleanupExpiredBenchShards(shards, now, expiredCount))
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -59,8 +59,7 @@ func BenchmarkMemoryCacheBackgroundCleanupExpired(b *testing.B) {
 
 				if completed < b.N {
 					b.StopTimer()
-					resetCleanupExpiredBenchShards(shards, now, expiredCount)
-					cache.current.Store(0)
+					cache.current.Store(resetCleanupExpiredBenchShards(shards, now, expiredCount))
 					b.StartTimer()
 				}
 			}
@@ -244,7 +243,9 @@ func populateCleanupBenchShard(b *testing.B, cache *MemoryCache, shardIndex, cou
 	}
 }
 
-func resetCleanupExpiredBenchShards(shards []memoryShard, now time.Time, expiredCount int) {
+func resetCleanupExpiredBenchShards(shards []memoryShard, now time.Time, expiredCount int) int64 {
+	var totalCost int64
+
 	for i := range shards {
 		entries := make(map[string]*memoryEntry, cleanupExpiredBenchSampleSize)
 		for entryIndex := 0; entryIndex < cleanupExpiredBenchSampleSize; entryIndex++ {
@@ -253,14 +254,18 @@ func resetCleanupExpiredBenchShards(shards []memoryShard, now time.Time, expired
 			if entryIndex < expiredCount {
 				expiresAt = now.Add(-time.Second)
 			}
-			entries[key] = &memoryEntry{
+			entry := &memoryEntry{
 				value:     []byte("value"),
 				expiresAt: expiresAt,
 				cost:      itemCost(key, []byte("value")),
 			}
+			entries[key] = entry
+			totalCost += entry.cost
 		}
 		shards[i].entries = entries
 	}
+
+	return totalCost
 }
 
 func populateCleanupContentionEntries(cache *MemoryCache, shardIndex int, now time.Time, expiredCount int) map[string]*memoryEntry {
