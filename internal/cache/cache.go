@@ -6,8 +6,9 @@ import (
 )
 
 var (
-	ErrInvalidTTL = errors.New("cache: ttl must be greater than zero")
-	ErrNilValue   = errors.New("cache: nil value is not allowed")
+	ErrInvalidTTL   = errors.New("cache: ttl must be greater than zero")
+	ErrNilValue     = errors.New("cache: nil value is not allowed")
+	ErrItemTooLarge = errors.New("cache: item exceeds maximum size")
 )
 
 type Cache interface {
