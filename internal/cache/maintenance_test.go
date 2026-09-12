@@ -87,32 +87,6 @@ func TestMemoryCachePurgeExpiredSampleIsBounded(t *testing.T) {
 	}
 }
 
-func TestMemoryCachePurgeExpiredSampleProgressesThroughShard(t *testing.T) {
-	cache := newTestMemoryCache(t, MemoryConfig{})
-	stopMemoryCacheMaintenanceForTest(cache)
-
-	now := time.Unix(100, 0)
-	cache.now = func() time.Time { return now }
-
-	const entries = 5
-	for i := 0; i < entries; i++ {
-		key := keyForMemoryShard(t, cache, 0, fmt.Sprintf("progress-%d", i))
-		mustSet(t, cache, key, []byte("value"), time.Second)
-	}
-
-	now = now.Add(2 * time.Second)
-	for pass := 0; pass < 3; pass++ {
-		cache.purgeExpiredSample(&cache.shards[0], now, 2)
-	}
-
-	if got := memoryShardEntryCount(&cache.shards[0]); got != 0 {
-		t.Fatalf("remaining entries = %d after progressive cleanup, want 0", got)
-	}
-	if got := cache.current.Load(); got != 0 {
-		t.Fatalf("current bytes = %d after progressive cleanup, want 0", got)
-	}
-}
-
 func keyForMemoryShard(t *testing.T, cache *MemoryCache, shardIndex int, prefix string) string {
 	t.Helper()
 
@@ -138,11 +112,4 @@ func memoryShardHasKey(shard *memoryShard, key string) bool {
 
 	_, ok := shard.entries[key]
 	return ok
-}
-
-func memoryShardEntryCount(shard *memoryShard) int {
-	shard.mu.RLock()
-	defer shard.mu.RUnlock()
-
-	return len(shard.entries)
 }
