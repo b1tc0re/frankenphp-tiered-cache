@@ -275,10 +275,17 @@ func (c *MemoryCache) runMaintenance() {
 	defer ticker.Stop()
 	defer close(c.maintenanceDone)
 
+	nextCleanupShard := 0
+
 	for {
 		select {
-		case <-ticker.C:
+		case now := <-ticker.C:
 			c.lruClock.Add(1)
+			c.purgeExpiredShard(&c.shards[nextCleanupShard], now)
+			nextCleanupShard++
+			if nextCleanupShard == len(c.shards) {
+				nextCleanupShard = 0
+			}
 		case <-c.maintenanceStop:
 			return
 		}
@@ -345,16 +352,19 @@ func (c *MemoryCache) evictFor(required int64) bool {
 
 func (c *MemoryCache) purgeExpired(now time.Time) {
 	for i := range c.shards {
-		shard := &c.shards[i]
-		shard.mu.Lock()
-		for key, entry := range shard.entries {
-			if isExpired(entry.expiresAt, now) {
-				delete(shard.entries, key)
-				c.current.Add(-entry.cost)
-			}
-		}
-		shard.mu.Unlock()
+		c.purgeExpiredShard(&c.shards[i], now)
 	}
+}
+
+func (c *MemoryCache) purgeExpiredShard(shard *memoryShard, now time.Time) {
+	shard.mu.Lock()
+	for key, entry := range shard.entries {
+		if isExpired(entry.expiresAt, now) {
+			delete(shard.entries, key)
+			c.current.Add(-entry.cost)
+		}
+	}
+	shard.mu.Unlock()
 }
 
 type evictionCandidate struct {
