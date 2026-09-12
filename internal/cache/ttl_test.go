@@ -19,11 +19,11 @@ func TestMemoryCacheTouchUpdatesLastAccess(t *testing.T) {
 	if err != nil || !touched {
 		t.Fatalf("Touch() = %v, %v; want true, nil", touched, err)
 	}
-	if got := entry.lastAccess.Load(); got != now.UnixNano() {
-		t.Fatalf("lastAccess = %d, want %d", got, now.UnixNano())
+	if got := entry.lastAccess.Load(); got <= initialLastAccess {
+		t.Fatalf("lastAccess = %d, want greater than %d", got, initialLastAccess)
 	}
-	if entry.lastAccess.Load() <= initialLastAccess {
-		t.Fatal("Touch() did not advance lastAccess")
+	if got := entry.lastAccess.Load(); got != cache.accessSeq.Load() {
+		t.Fatalf("lastAccess = %d, access sequence = %d; want equal", got, cache.accessSeq.Load())
 	}
 }
 
