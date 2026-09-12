@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const lruClockResolution = time.Second
+
 type memoryEntry struct {
 	value      []byte
 	expiresAt  int64
@@ -27,10 +29,14 @@ type MemoryCache struct {
 	maxMemory   int64
 	maxItemSize int64
 	current     atomic.Int64
-	accessSeq   atomic.Uint64
+	lruClock    atomic.Uint64
 	evictionMu  sync.Mutex
 	lruSamples  int
 	now         func() time.Time
+
+	maintenanceStop chan struct{}
+	maintenanceDone chan struct{}
+	closeOnce       sync.Once
 }
 
 var _ Cache = (*MemoryCache)(nil)
@@ -56,14 +62,20 @@ func newMemoryCache(config MemoryConfig, shardCount, lruSamples int) (*MemoryCac
 		shards[i].entries = make(map[string]*memoryEntry)
 	}
 
-	return &MemoryCache{
-		shards:      shards,
-		hashSeed:    maphash.MakeSeed(),
-		maxMemory:   cfg.MaxMemoryBytes,
-		maxItemSize: cfg.MaxItemSizeBytes,
-		lruSamples:  lruSamples,
-		now:         time.Now,
-	}, nil
+	cache := &MemoryCache{
+		shards:          shards,
+		hashSeed:        maphash.MakeSeed(),
+		maxMemory:       cfg.MaxMemoryBytes,
+		maxItemSize:     cfg.MaxItemSizeBytes,
+		lruSamples:      lruSamples,
+		now:             time.Now,
+		maintenanceStop: make(chan struct{}),
+		maintenanceDone: make(chan struct{}),
+	}
+	cache.lruClock.Store(1)
+	go cache.runMaintenance()
+
+	return cache, nil
 }
 
 // Get returns the cached value without copying it. A nil value with a nil error
@@ -185,6 +197,16 @@ func (c *MemoryCache) Flush() (bool, error) {
 	return true, nil
 }
 
+// Close stops MemoryCache background maintenance. The cache must not be used after Close.
+func (c *MemoryCache) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.maintenanceStop)
+		<-c.maintenanceDone
+	})
+
+	return nil
+}
+
 func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, error) {
 	cost := itemCost(key, value)
 	if cost > c.maxItemSize {
@@ -231,17 +253,31 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, erro
 }
 
 func (c *MemoryCache) recordAccess(entry *memoryEntry) {
-	sequence := c.accessSeq.Add(1)
-	storeMaxAccessSequence(entry, sequence)
+	storeMaxAccessClock(entry, c.lruClock.Load())
 }
 
-func storeMaxAccessSequence(entry *memoryEntry, sequence uint64) {
+func storeMaxAccessClock(entry *memoryEntry, clock uint64) {
 	for {
 		current := entry.lastAccess.Load()
-		if current >= sequence {
+		if current >= clock {
 			return
 		}
-		if entry.lastAccess.CompareAndSwap(current, sequence) {
+		if entry.lastAccess.CompareAndSwap(current, clock) {
+			return
+		}
+	}
+}
+
+func (c *MemoryCache) runMaintenance() {
+	ticker := time.NewTicker(lruClockResolution)
+	defer ticker.Stop()
+	defer close(c.maintenanceDone)
+
+	for {
+		select {
+		case <-ticker.C:
+			c.lruClock.Add(1)
+		case <-c.maintenanceStop:
 			return
 		}
 	}
