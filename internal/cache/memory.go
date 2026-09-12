@@ -25,6 +25,7 @@ type memoryEntry struct {
 type memoryShard struct {
 	mu      sync.RWMutex
 	entries map[string]*memoryEntry
+	cleanup expirationScanner
 }
 
 type MemoryCache struct {
@@ -190,6 +191,7 @@ func (c *MemoryCache) Flush() (bool, error) {
 
 	for i := range c.shards {
 		clear(c.shards[i].entries)
+		c.shards[i].cleanup.reset()
 	}
 	c.current.Store(0)
 
@@ -215,7 +217,6 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt time.Time) (bool, 
 	if cost > c.maxItemSize {
 		return false, fmt.Errorf(
 			"%w: item size %d bytes exceeds limit %d bytes",
-			ErrItemTooLarge,
 			cost,
 			c.maxItemSize,
 		)
@@ -365,41 +366,8 @@ func (c *MemoryCache) purgeExpiredShard(shard *memoryShard, now time.Time) {
 			c.current.Add(-entry.cost)
 		}
 	}
+	shard.cleanup.reset()
 	shard.mu.Unlock()
-}
-
-type expirationCandidate struct {
-	key   string
-	entry *memoryEntry
-}
-
-func (c *MemoryCache) purgeExpiredSample(shard *memoryShard, now time.Time, sampleSize int) {
-	if sampleSize <= 0 {
-		return
-	}
-
-	candidates := make([]expirationCandidate, 0, sampleSize)
-
-	shard.mu.RLock()
-	sampled := 0
-	for key, entry := range shard.entries {
-		if isExpired(entry.expiresAt, now) {
-			candidates = append(candidates, expirationCandidate{
-				key:   key,
-				entry: entry,
-			})
-		}
-
-		sampled++
-		if sampled >= sampleSize {
-			break
-		}
-	}
-	shard.mu.RUnlock()
-
-	for i := range candidates {
-		c.deleteExpired(shard, candidates[i].key, candidates[i].entry, now)
-	}
 }
 
 type evictionCandidate struct {
