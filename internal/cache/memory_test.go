@@ -233,29 +233,41 @@ func TestMemoryCacheRejectsNilValue(t *testing.T) {
 	}
 }
 
-func TestMemoryCacheOversizedItemReturnsFalse(t *testing.T) {
+func TestMemoryCacheRejectsOversizedItem(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{
 		MaxMemoryBytes:   1024,
 		MaxItemSizeBytes: 256,
 	})
 
-	stored, err := cache.Forever("key", make([]byte, 257))
-	if err != nil || stored {
-		t.Fatalf("Forever(oversized) = %v, %v; want false, nil", stored, err)
+	stored, err := cache.Forever("key", make([]byte, 254))
+	if stored || !errors.Is(err, ErrItemTooLarge) {
+		t.Fatalf("Forever(oversized) = %v, %v; want false, ErrItemTooLarge", stored, err)
+	}
+}
+
+func TestMemoryCacheAllowsItemAtExactSizeLimit(t *testing.T) {
+	cache := newTestMemoryCache(t, MemoryConfig{
+		MaxMemoryBytes:   1024,
+		MaxItemSizeBytes: 256,
+	})
+
+	stored, err := cache.Forever("key", make([]byte, 253))
+	if err != nil || !stored {
+		t.Fatalf("Forever(exact limit) = %v, %v; want true, nil", stored, err)
 	}
 }
 
 func TestMemoryCacheAccountsRetainedCapacity(t *testing.T) {
 	cache := newTestMemoryCache(t, MemoryConfig{
 		MaxMemoryBytes:   2048,
-		MaxItemSizeBytes: 1024,
+		MaxItemSizeBytes: 2048,
 	})
 
 	backing := make([]byte, 1024)
 	value := backing[:1]
 	mustForever(t, cache, "key", value)
 
-	want := int64(len("key")+cap(value)) + entryOverheadBytes
+	want := int64(len("key") + cap(value))
 	if got := cache.current.Load(); got != want {
 		t.Fatalf("current bytes = %d, want %d", got, want)
 	}
@@ -370,7 +382,6 @@ func TestMemoryCacheConcurrentAccess(t *testing.T) {
 						t.Errorf("Forget() error = %v", err)
 						return
 					}
-				}
 			}
 		}()
 	}
