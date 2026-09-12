@@ -41,6 +41,32 @@ Background maintenance не использует busy loop и не создаё�
 
 Будущая инвалидация L1 между pod'ами через Redis должна быть отдельным механизмом: сообщение об invalidation удаляет соответствующий локальный ключ и не использует `lastAccess` для синхронизации или определения актуальности данных.
 
+### Memory limits and pressure diagnostics
+
+`MemoryCache` использует консервативные process-local defaults: `DefaultMaxMemoryBytes = 64 MiB` и `DefaultMaxItemSizeBytes = 4 MiB`. Это policy defaults, а не значения, подобранные benchmark'ом.
+
+Нормализация `Config` работает так:
+
+```text
+MaxMemoryBytes = 0
+→ 64 MiB
+
+MaxItemSizeBytes = 0
+→ min(4 MiB, MaxMemoryBytes)
+
+любое отрицательное значение
+→ configuration error
+
+явно заданный MaxItemSizeBytes > MaxMemoryBytes
+→ configuration error
+```
+
+Лимит `MaxMemoryBytes` относится к памяти, учитываемой самим cache (`len(key) + cap(value)` для каждой записи), а не ко всему Go heap или RSS процесса. Если пользователь меняет общий memory budget, default item limit остаётся до `4 MiB` и clamp'ится только когда сам `MaxMemoryBytes` меньше `4 MiB`; фиксированная доля от общего budget намеренно не навязывается.
+
+Достижение memory limit само по себе не является ошибкой: перед записью `MemoryCache` может удалить expired entries, а затем при необходимости вытеснить live entry через approximate-LRU. Удаление live entry из-за memory pressure считается диагностическим событием и передаётся через optional `Observer` как `EvictionEvent`. TTL cleanup, `Forget()` и `Flush()` такого события не создают.
+
+`Observer` не занимается логированием и не зависит от FrankenPHP. Его задача — сообщить верхнему integration layer факт pressure eviction. Callback вызывается после освобождения shard lock; реализация observer должна быть concurrency-safe и возвращаться быстро. Уже integration layer может превратить событие, например, в warning FrankenPHP о том, что cache начал вытеснять полезные записи и, возможно, требуется увеличить memory limit.
+
 ### MemoryCache tuning
 
 Часть внутренних параметров `MemoryCache` выбрана после отдельных benchmark-серий и intentionally не вынесена в публичный `Config`. Это implementation defaults: если реальные production-профили покажут другую картину, их можно менять внутри backend без расширения пользовательского API.
@@ -53,6 +79,12 @@ Background maintenance не использует busy loop и не создаё�
 | `backgroundCleanupShardsPerTick` | `16` | Для стандартных `64` shards это полный round примерно за четыре секунды при стоимости порядка `23 µs` на maintenance tick. |
 
 `lruClockResolution = 1s` и `maxEvictionRetries = 3` рассматриваются отдельно от performance tuning: первое является частью выбранной coarse-LRU модели, второе — bounded safety limit для pressure eviction.
+
+### MemoryCache status
+
+На текущем этапе semantics, memory policy и tuning `MemoryCache` считаются стабилизированными для перехода к `RedisCache`. Новых архитектурных изменений в backend не планируется без конкретной причины: bugfix, обнаруженный invariant issue, новый production profile или измеримое требование производительности.
+
+Это stage freeze, а не обещание долгосрочной backward compatibility всего проекта: репозиторий остаётся экспериментальным, и общий extension API ещё может меняться по мере появления `RedisCache` и `TieredCache`.
 
 ## Ветки
 
