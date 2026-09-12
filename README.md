@@ -41,6 +41,19 @@ Background maintenance не использует busy loop и не создаё�
 
 Будущая инвалидация L1 между pod'ами через Redis должна быть отдельным механизмом: сообщение об invalidation удаляет соответствующий локальный ключ и не использует `lastAccess` для синхронизации или определения актуальности данных.
 
+### MemoryCache tuning
+
+Часть внутренних параметров `MemoryCache` выбрана после отдельных benchmark-серий и intentionally не вынесена в публичный `Config`. Это implementation defaults: если реальные production-профили покажут другую картину, их можно менять внутри backend без расширения пользовательского API.
+
+| Параметр | Значение | Почему выбрано |
+| --- | ---: | --- |
+| `defaultShardCount` | `64` | `128` быстрее на distinct-key workload, но дальнейший выигрыш уже с diminishing returns и сопровождается дополнительным overhead. |
+| `defaultLRUSamples` | `5` | `1` заметно хуже удерживает hot entries, `3` уже близок к достаточному качеству, а `8` и `16` не дали практически дополнительного retention, но сделали eviction дороже. |
+| `evictionTargetPct` | `95` | `80` и `90` сильнее недозаполняют cache после pressure eviction, а `99` почти не оставляет свободного запаса и примерно вдвое удорожает pressure path. |
+| `backgroundCleanupShardsPerTick` | `16` | Для стандартных `64` shards это полный round примерно за четыре секунды при стоимости порядка `23 µs` на maintenance tick. |
+
+`lruClockResolution = 1s` и `maxEvictionRetries = 3` рассматриваются отдельно от performance tuning: первое является частью выбранной coarse-LRU модели, второе — bounded safety limit для pressure eviction.
+
 ## Ветки
 
 - `main` — стабильное состояние и релизы.
