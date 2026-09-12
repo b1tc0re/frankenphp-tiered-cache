@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const lruClockResolution = time.Second
+const (
+	lruClockResolution = time.Second
+	maxEvictionRetries = 3
+)
 
 type memoryEntry struct {
 	value      []byte
@@ -318,8 +321,21 @@ func (c *MemoryCache) evictFor(required int64) bool {
 		target = 0
 	}
 
+	failedEvictions := 0
 	for c.current.Load() > target {
-		if !c.evictOneLRU() {
+		before := c.current.Load()
+		if c.evictOneLRU() {
+			failedEvictions = 0
+			continue
+		}
+
+		if c.current.Load() < before {
+			failedEvictions = 0
+			continue
+		}
+
+		failedEvictions++
+		if failedEvictions >= maxEvictionRetries {
 			break
 		}
 	}
@@ -401,17 +417,21 @@ func (c *MemoryCache) evictOneLRU() bool {
 		return false
 	}
 
-	oldest.shard.mu.Lock()
-	current, ok := oldest.shard.entries[oldest.key]
-	if ok && current == oldest.entry {
-		delete(oldest.shard.entries, oldest.key)
-		c.current.Add(-oldest.entry.cost)
-		oldest.shard.mu.Unlock()
+	return c.tryEvictCandidate(oldest)
+}
+
+func (c *MemoryCache) tryEvictCandidate(candidate *evictionCandidate) bool {
+	candidate.shard.mu.Lock()
+	current, ok := candidate.shard.entries[candidate.key]
+	if ok && current == candidate.entry {
+		delete(candidate.shard.entries, candidate.key)
+		c.current.Add(-candidate.entry.cost)
+		candidate.shard.mu.Unlock()
 		return true
 	}
-	oldest.shard.mu.Unlock()
+	candidate.shard.mu.Unlock()
 
-	return true
+	return false
 }
 
 func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *memoryEntry, now time.Time) {
