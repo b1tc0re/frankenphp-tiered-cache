@@ -12,7 +12,7 @@ import (
 type memoryEntry struct {
 	value      []byte
 	expiresAt  int64
-	lastAccess atomic.Int64
+	lastAccess atomic.Uint64
 	cost       int64
 }
 
@@ -27,6 +27,7 @@ type MemoryCache struct {
 	maxMemory   int64
 	maxItemSize int64
 	current     atomic.Int64
+	accessSeq   atomic.Uint64
 	evictionMu  sync.Mutex
 	lruSamples  int
 	now         func() time.Time
@@ -83,7 +84,7 @@ func (c *MemoryCache) Get(key string) ([]byte, error) {
 		return nil, nil
 	}
 
-	entry.lastAccess.Store(now)
+	entry.lastAccess.Store(c.accessSeq.Add(1))
 	value := entry.value
 	shard.mu.RUnlock()
 
@@ -132,7 +133,7 @@ func (c *MemoryCache) Forget(key string) (bool, error) {
 	return !expired, nil
 }
 
-// Touch updates the TTL and access time of a live key. It returns false when the key is missing or expired.
+// Touch updates the TTL and access order of a live key. It returns false when the key is missing or expired.
 func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
 		return false, ErrInvalidTTL
@@ -157,7 +158,7 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	entry.expiresAt = expiresAt
-	entry.lastAccess.Store(nowUnixNano)
+	entry.lastAccess.Store(c.accessSeq.Add(1))
 	shard.mu.Unlock()
 
 	return true, nil
@@ -198,13 +199,12 @@ func (c *MemoryCache) set(key string, value []byte, expiresAt int64) (bool, erro
 	shard := c.shardFor(key)
 
 	for {
-		now := c.now().UnixNano()
 		entry := &memoryEntry{
 			value:     value,
 			expiresAt: expiresAt,
 			cost:      cost,
 		}
-		entry.lastAccess.Store(now)
+		entry.lastAccess.Store(c.accessSeq.Add(1))
 
 		shard.mu.Lock()
 		old := shard.entries[key]
@@ -293,7 +293,7 @@ type evictionCandidate struct {
 	shard      *memoryShard
 	key        string
 	entry      *memoryEntry
-	lastAccess int64
+	lastAccess uint64
 }
 
 func (c *MemoryCache) evictOneLRU() bool {
