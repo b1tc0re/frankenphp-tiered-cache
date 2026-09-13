@@ -44,30 +44,34 @@ func TestPressureReporterDoesNotReportEmptyWindows(t *testing.T) {
 	}
 }
 
-func TestPressureReporterConcurrentObserve(t *testing.T) {
+func TestPressureReporterConcurrentObserveAggregatesBatches(t *testing.T) {
 	summaries := make(chan PressureSummary, 1)
 	reporter := newTestPressureReporter(t, 10*time.Millisecond, func(summary PressureSummary) {
 		summaries <- summary
 	})
 
-	const events = 100
+	const batches = 100
+	const entriesPerBatch uint64 = 3
+	const bytesPerBatch int64 = 21
 	var wg sync.WaitGroup
-	wg.Add(events)
-	for i := 0; i < events; i++ {
+	wg.Add(batches)
+	for i := 0; i < batches; i++ {
 		go func() {
 			defer wg.Done()
-			reporter.Observe(1, 7)
+			reporter.Observe(entriesPerBatch, bytesPerBatch)
 		}()
 	}
 	wg.Wait()
 
 	select {
 	case summary := <-summaries:
-		if summary.EvictedEntries != events {
-			t.Fatalf("evicted entries = %d, want %d", summary.EvictedEntries, events)
+		wantEntries := uint64(batches) * entriesPerBatch
+		if summary.EvictedEntries != wantEntries {
+			t.Fatalf("evicted entries = %d, want %d", summary.EvictedEntries, wantEntries)
 		}
-		if summary.EvictedBytes != events*7 {
-			t.Fatalf("evicted bytes = %d, want %d", summary.EvictedBytes, events*7)
+		wantBytes := int64(batches) * bytesPerBatch
+		if summary.EvictedBytes != wantBytes {
+			t.Fatalf("evicted bytes = %d, want %d", summary.EvictedBytes, wantBytes)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for concurrent pressure summary")
