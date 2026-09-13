@@ -23,7 +23,7 @@ TTL задаётся как относительное время жизни з�
 
 Runtime deadline хранится как `time.Time`, полученный через `time.Now().Add(ttl)`. В production такой `time.Time` содержит monotonic-компонент, который сохраняется при `Add` и используется методами сравнения `time.Time`. Поэтому изменение wall clock системой или NTP не должно продлевать или преждевременно завершать локальный TTL. Для `Forever` используется нулевой `time.Time{}`.
 
-Monotonic-компонент `time.Time` существует только внутри текущего Go-процесса и не предназначен для сериализации или сравнения между pod'ами. Будущий `TieredCache` должен передавать Redis оставшийся TTL или отдельное распределённое представление deadline, а не сохранять внутренний `expiresAt` из `MemoryCache`.
+Monotonic-компонент `time.Time` существует только внутри текущего Go-процесса и не предназначен для сериализации или сравнения между pod'ами. `TieredCache` передаёт Redis оставшийся TTL, а не сохраняет внутренний `expiresAt` из `MemoryCache`.
 
 Expired запись считается отсутствующей сразу после достижения `expiresAt`, даже если физически она ещё находится в map. `Get` возвращает miss, а `Forget` и `Touch` возвращают `false`. При обращении такая запись удаляется и её учтённый размер освобождается.
 
@@ -39,7 +39,34 @@ Background maintenance не использует busy loop и не создаё�
 
 Значение `lastAccess` не является временем, версией данных или распределённым идентификатором и не должно сравниваться между процессами или pod'ами.
 
-Будущая инвалидация L1 между pod'ами через Redis должна быть отдельным механизмом: сообщение об invalidation удаляет соответствующий локальный ключ и не использует `lastAccess` для синхронизации или определения актуальности данных.
+### Cross-pod invalidation
+
+Для нескольких pod'ов `TieredCache` можно создать с Redis Pub/Sub bus:
+
+```go
+redisCache, err := redis.New(redisConfig)
+if err != nil {
+	return err
+}
+
+invalidationBus, err := redis.NewInvalidationBus(redisConfig)
+if err != nil {
+	return err
+}
+
+tieredCache, err := tiered.NewWithInvalidation(
+	tieredConfig,
+	memoryCache,
+	redisCache,
+	invalidationBus,
+)
+```
+
+`Set`, `Forever`, `Forget` и `Touch` публикуют key-invalidation после успешной L2-операции. `Flush` публикует отдельное событие после успешной очистки L2. Полученное событие удаляет только соответствующий ключ или весь локальный L1; оно никогда не вызывает операцию TieredCache и не приводит к циклу публикаций.
+
+Redis Pub/Sub является at-most-once транспортом. Если subscriber теряет соединение, pod переводится в `degraded`, его L1 очищается, а после reconnect L1 очищается ещё раз до возобновления healthy-состояния. Поэтому потерянные во время reconnect события не оставляют stale-данные в локальном cache. Ошибка публикации после успешной L2-мутации также переводит pod в `degraded`; recovery повторяет invalidation-событие и удаляет dirty key из L2. Для `Flush` recovery повторяет только Pub/Sub-событие, но не сам `Flush`.
+
+Связка L2-мутации и `PUBLISH` состоит из двух Redis-команд. Между успешной L2-мутацией и публикацией остаётся небольшой crash gap: если процесс завершится в этот момент, уже работающий другой pod может некоторое время держать старое значение в L1. Для строгой гарантии без этого gap потребуется отдельный атомарный Redis Lua-протокол или durable outbox/Streams; текущий Pub/Sub слой сохраняет быстрый hot path и корректно восстанавливается при обычных ошибках соединения.
 
 ### Memory limits and pressure diagnostics
 
@@ -114,6 +141,25 @@ franken_tiered smoke test passed (0.0.0-dev).
 ```
 
 Dockerfile собирает FrankenPHP через `xcaddy` и подключает этот модуль непосредственно в бинарник. Smoke-test запускается отдельно после сборки, поэтому его результат не нужно искать в Docker build log.
+
+### Redis integration test
+
+Для проверки cross-pod invalidation нужен доступный Redis. Удобный локальный сценарий:
+
+```bash
+task test:integration
+task redis:down
+```
+
+`task test:integration` поднимает зафиксированный в `compose.yaml` Redis `7-alpine`, запускает реальный тест с двумя независимыми L1 и двумя Redis L2/Pub/Sub connections, затем оставляет сервис запущенным для повторных прогонов. `task redis:down` останавливает и удаляет контейнер Compose.
+
+Тот же тест можно запускать без Docker, если Redis уже доступен:
+
+```bash
+REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+```
+
+Обычный `task test` не требует Redis: интеграционный тест пропускается, если `REDIS_ADDR` не задан.
 
 Интеграция с Laravel будет разрабатываться отдельно и не является частью этого репозитория.
 

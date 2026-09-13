@@ -33,6 +33,23 @@ tasks:
     cmds:
       - go test -race ./internal/...
 
+  redis:up:
+    desc: Start the Redis service for integration tests
+    cmds:
+      - docker compose up -d --wait redis
+
+  redis:down:
+    desc: Stop the Redis service used by integration tests
+    cmds:
+      - docker compose down --remove-orphans
+
+  test:integration:
+    desc: Run the real Redis Pub/Sub integration test
+    deps:
+      - redis:up
+    cmds:
+      - REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+
   bench:get:
     desc: Measure production MemoryCache Get contention across same and distinct keys
     cmds:

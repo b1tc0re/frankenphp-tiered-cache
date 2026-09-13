@@ -1,6 +1,7 @@
 package tiered
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
+	cacheinvalidation "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/invalidation"
 )
 
 type writeOperation struct {
@@ -164,26 +166,43 @@ type TieredCache struct {
 	onWriteError          func(key string, err error)
 	now                   func() time.Time
 
-	healthState       atomic.Uint32
-	stateErrMu        sync.RWMutex
-	stateErr          error
-	degradedFlushDone chan struct{}
-	recoveryWake      chan struct{}
-	recoveryStop      chan struct{}
-	recoveryDone      chan struct{}
-	dirtyMu           sync.Mutex
-	dirtyKeys         map[string]struct{}
-	mutationMu        sync.Mutex
-	lifecycleMu       sync.RWMutex
-	mutationVersion   atomic.Uint64
-	closeOnce         sync.Once
-	closeErr          error
-	closed            bool
+	healthState        atomic.Uint32
+	stateErrMu         sync.RWMutex
+	stateErr           error
+	degradedFlushDone  chan struct{}
+	recoveryWake       chan struct{}
+	recoveryStop       chan struct{}
+	recoveryDone       chan struct{}
+	dirtyMu            sync.Mutex
+	dirtyKeys          map[string]struct{}
+	pendingFlushMu     sync.Mutex
+	pendingFlush       bool
+	mutationMu         sync.Mutex
+	lifecycleMu        sync.RWMutex
+	mutationVersion    atomic.Uint64
+	invalidationBus    cacheinvalidation.Bus
+	invalidationOrigin string
+	invalidationReady  atomic.Bool
+	invalidationCancel context.CancelFunc
+	invalidationDone   chan struct{}
+	closeOnce          sync.Once
+	closeErr           error
+	closed             bool
 }
 
 var _ cachecontract.Cache = (*TieredCache)(nil)
 
 func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
+	return newTieredCache(config, l1, l2, nil)
+}
+
+// NewWithInvalidation composes L1 and L2 with a cross-instance invalidation
+// bus. Received events are applied to this cache's L1 only.
+func NewWithInvalidation(config Config, l1, l2 cachecontract.Cache, bus cacheinvalidation.Bus) (*TieredCache, error) {
+	return newTieredCache(config, l1, l2, bus)
+}
+
+func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalidation.Bus) (*TieredCache, error) {
 	if l1 == nil {
 		return nil, fmt.Errorf("tiered cache: L1 cache must not be nil")
 	}
@@ -210,6 +229,17 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 		recoveryStop:          make(chan struct{}),
 		recoveryDone:          make(chan struct{}),
 		dirtyKeys:             make(map[string]struct{}),
+		invalidationBus:       bus,
+		invalidationDone:      make(chan struct{}),
+	}
+	cache.invalidationOrigin = fmt.Sprintf("%p", cache)
+	if bus == nil {
+		cache.invalidationReady.Store(true)
+		close(cache.invalidationDone)
+	} else {
+		invalidationContext, cancel := context.WithCancel(context.Background())
+		cache.invalidationCancel = cancel
+		go cache.runInvalidationSubscriber(invalidationContext)
 	}
 	go cache.runWriter()
 	go cache.runRecovery()
@@ -218,21 +248,29 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 }
 
 func (c *TieredCache) unavailableError() error {
-	if healthState(c.healthState.Load()) != degraded {
-		return nil
-	}
-
 	c.stateErrMu.RLock()
-	if healthState(c.healthState.Load()) != degraded {
-		c.stateErrMu.RUnlock()
-		return nil
-	}
+	state := healthState(c.healthState.Load())
 	err := c.stateErr
 	c.stateErrMu.RUnlock()
+
+	if state != degraded && (c.invalidationBus == nil || c.invalidationReady.Load()) {
+		return nil
+	}
 	if err == nil {
 		return ErrL2Unavailable
 	}
 	return fmt.Errorf("%w: %w", ErrL2Unavailable, err)
+}
+
+func (c *TieredCache) degradeAndFlush(cause error) {
+	newlyDegraded, flushDone := c.transitionToDegraded(cause)
+	if !newlyDegraded {
+		return
+	}
+
+	c.mutationMu.Lock()
+	c.flushL1Locked(flushDone)
+	c.mutationMu.Unlock()
 }
 
 func (c *TieredCache) transitionToDegraded(cause error) (bool, chan struct{}) {
@@ -301,11 +339,62 @@ func (c *TieredCache) markDirty(key string) {
 	c.dirtyMu.Unlock()
 }
 
+func (c *TieredCache) publishKeyInvalidation(key string) error {
+	if c.invalidationBus == nil {
+		return nil
+	}
+
+	return c.invalidationBus.Publish(context.Background(), cacheinvalidation.Event{
+		Version: cacheinvalidation.ProtocolVersion,
+		Type:    cacheinvalidation.EventTypeInvalidate,
+		Key:     key,
+		Origin:  c.invalidationOrigin,
+	})
+}
+
+func (c *TieredCache) publishFlushInvalidation() error {
+	if c.invalidationBus == nil {
+		return nil
+	}
+
+	return c.invalidationBus.Publish(context.Background(), cacheinvalidation.Event{
+		Version: cacheinvalidation.ProtocolVersion,
+		Type:    cacheinvalidation.EventTypeFlush,
+		Origin:  c.invalidationOrigin,
+	})
+}
+
+func (c *TieredCache) markPendingFlush() {
+	c.pendingFlushMu.Lock()
+	c.pendingFlush = true
+	c.pendingFlushMu.Unlock()
+}
+
+func (c *TieredCache) recoverPendingFlush() bool {
+	if c.invalidationBus == nil {
+		return true
+	}
+
+	c.pendingFlushMu.Lock()
+	defer c.pendingFlushMu.Unlock()
+	if !c.pendingFlush {
+		return true
+	}
+	if err := c.publishFlushInvalidation(); err != nil {
+		return false
+	}
+	c.pendingFlush = false
+	return true
+}
+
 func (c *TieredCache) recoverDirtyKeys() bool {
 	c.dirtyMu.Lock()
 	defer c.dirtyMu.Unlock()
 
 	for key := range c.dirtyKeys {
+		if err := c.publishKeyInvalidation(key); err != nil {
+			return false
+		}
 		if _, err := c.l2.Forget(key); err != nil {
 			return false
 		}
@@ -336,8 +425,11 @@ func (c *TieredCache) runRecovery() {
 				if healthState(c.healthState.Load()) != degraded {
 					continue
 				}
+				if c.invalidationBus != nil && !c.invalidationReady.Load() {
+					continue
+				}
 
-				if _, _, err := c.l2.Get(recoveryProbeKey); err == nil && c.recoverDirtyKeys() {
+				if _, _, err := c.l2.Get(recoveryProbeKey); err == nil && c.recoverPendingFlush() && c.recoverDirtyKeys() {
 					c.enterHealthy()
 				}
 			case <-c.recoveryStop:
@@ -346,6 +438,116 @@ func (c *TieredCache) runRecovery() {
 			}
 		}
 		ticker.Stop()
+	}
+}
+
+func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
+	defer close(c.invalidationDone)
+
+	firstSubscription := true
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		subscription, err := c.invalidationBus.Subscribe(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			c.invalidationReady.Store(false)
+			c.degradeAndFlush(err)
+			if !waitForRetry(ctx, c.recoveryInterval) {
+				return
+			}
+			continue
+		}
+
+		if !firstSubscription {
+			c.invalidationReady.Store(false)
+			if err := c.flushLocalL1(); err != nil {
+				_ = subscription.Close()
+				c.degradeAndFlush(err)
+				if !waitForRetry(ctx, c.recoveryInterval) {
+					return
+				}
+				continue
+			}
+		}
+		firstSubscription = false
+		c.invalidationReady.Store(true)
+
+		for {
+			event, receiveErr := subscription.Receive(ctx)
+			if receiveErr != nil {
+				_ = subscription.Close()
+				if ctx.Err() != nil {
+					return
+				}
+				c.invalidationReady.Store(false)
+				c.degradeAndFlush(receiveErr)
+				break
+			}
+
+			if event.Origin == c.invalidationOrigin {
+				continue
+			}
+			if err := c.applyInvalidation(event); err != nil {
+				c.degradeAndFlush(err)
+			}
+		}
+
+		if !waitForRetry(ctx, c.recoveryInterval) {
+			return
+		}
+	}
+}
+
+func waitForRetry(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (c *TieredCache) flushLocalL1() error {
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+	if c.closed {
+		return nil
+	}
+
+	c.mutationVersion.Add(1)
+	_, err := c.l1.Flush()
+	return err
+}
+
+func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
+	if err := event.Validate(); err != nil {
+		return err
+	}
+
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+	if c.closed {
+		return nil
+	}
+
+	c.mutationVersion.Add(1)
+	switch event.Type {
+	case cacheinvalidation.EventTypeInvalidate:
+		_, err := c.l1.Forget(event.Key)
+		return err
+	case cacheinvalidation.EventTypeFlush:
+		_, err := c.l1.Flush()
+		return err
+	default:
+		return event.Validate()
 	}
 }
 
@@ -482,9 +684,13 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	}
 	l1Removed, l1Err := c.l1.Forget(key)
 	l2Removed, l2Err := c.l2.Forget(key)
-	backendErr := errors.Join(l1Err, l2Err)
+	var publishErr error
+	if l2Err == nil {
+		publishErr = c.publishKeyInvalidation(key)
+	}
+	backendErr := errors.Join(l1Err, l2Err, publishErr)
 	if backendErr != nil {
-		if l2Err != nil {
+		if l2Err != nil || publishErr != nil {
 			c.markDirty(key)
 		}
 		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
@@ -524,9 +730,13 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 	l1Touched, l1Err := c.l1.Touch(key, ttl)
 	l2Touched, l2Err := c.l2.Touch(key, ttl)
-	backendErr := errors.Join(l1Err, l2Err)
+	var publishErr error
+	if l2Err == nil {
+		publishErr = c.publishKeyInvalidation(key)
+	}
+	backendErr := errors.Join(l1Err, l2Err, publishErr)
 	if backendErr != nil {
-		if l2Err != nil {
+		if l2Err != nil || publishErr != nil {
 			c.markDirty(key)
 		}
 		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
@@ -568,6 +778,15 @@ func (c *TieredCache) Flush() (bool, error) {
 		c.mutationMu.Unlock()
 		return false, c.unavailableError()
 	}
+	if err := c.publishFlushInvalidation(); err != nil {
+		c.markPendingFlush()
+		newlyDegraded, flushDone := c.transitionToDegraded(err)
+		if newlyDegraded {
+			c.flushL1Locked(flushDone)
+		}
+		c.mutationMu.Unlock()
+		return false, c.unavailableError()
+	}
 	if l2Err == nil {
 		c.pending.clearAll()
 	}
@@ -585,11 +804,19 @@ func (c *TieredCache) Close() error {
 		c.mutationVersion.Add(1)
 		c.queue.close()
 		close(c.recoveryStop)
+		if c.invalidationCancel != nil {
+			c.invalidationCancel()
+		}
 		c.mutationMu.Unlock()
 
 		<-c.workerDone
 		<-c.recoveryDone
-		c.closeErr = errors.Join(c.l2.Close(), c.l1.Close())
+		<-c.invalidationDone
+		var invalidationErr error
+		if c.invalidationBus != nil {
+			invalidationErr = c.invalidationBus.Close()
+		}
+		c.closeErr = errors.Join(invalidationErr, c.l2.Close(), c.l1.Close())
 	})
 
 	return c.closeErr
@@ -661,6 +888,9 @@ func (c *TieredCache) runWriter() {
 			} else {
 				_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
 			}
+		}
+		if err == nil {
+			err = c.publishKeyInvalidation(operation.key)
 		}
 		newlyDegraded := false
 		var flushDone chan struct{}

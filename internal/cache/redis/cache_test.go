@@ -244,6 +244,12 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestInvalidationChannelUsesRedisKeyPrefix(t *testing.T) {
+	if got, want := invalidationChannel("test:"), "test:__invalidation"; got != want {
+		t.Fatalf("invalidationChannel() = %q, want %q", got, want)
+	}
+}
+
 func TestRedisScanPatternEscapesGlobCharacters(t *testing.T) {
 	if got, want := redisScanPattern("test\\*[?"), "test\\\\\\*\\[\\?*"; got != want {
 		t.Fatalf("redisScanPattern() = %q, want %q", got, want)
