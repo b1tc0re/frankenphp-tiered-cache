@@ -2,6 +2,7 @@ package tiered
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -378,6 +379,49 @@ func TestTieredCacheCloseIsIdempotent(t *testing.T) {
 	}
 	if l1.closeCount() != 1 || l2.closeCount() != 1 {
 		t.Fatalf("Close() counts = (%d, %d), want (1, 1)", l1.closeCount(), l2.closeCount())
+	}
+}
+
+func TestTieredCacheEnterHealthySerializesStateCleanup(t *testing.T) {
+	cache := &TieredCache{}
+	oldErr := errors.New("old L2 error")
+	oldFlushDone := make(chan struct{})
+	cache.healthState.Store(uint32(degraded))
+	cache.stateErr = oldErr
+	cache.degradedFlushDone = oldFlushDone
+
+	cache.stateErrMu.Lock()
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		cache.enterHealthy()
+		close(done)
+	}()
+	<-started
+
+	for i := 0; i < 1000; i++ {
+		if healthState(cache.healthState.Load()) != degraded {
+			t.Fatal("enterHealthy changed health before acquiring stateErrMu")
+		}
+		runtime.Gosched()
+	}
+	cache.stateErrMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("enterHealthy did not finish")
+	}
+	if healthState(cache.healthState.Load()) != healthy {
+		t.Fatal("health state = degraded, want healthy")
+	}
+	cache.stateErrMu.RLock()
+	degradedFlushDone := cache.degradedFlushDone
+	stateErr := cache.stateErr
+	cache.stateErrMu.RUnlock()
+	if stateErr != nil || degradedFlushDone != nil {
+		t.Fatalf("state after enterHealthy = (err %v, flush %v), want (nil, nil)", stateErr, degradedFlushDone)
 	}
 }
 

@@ -222,6 +222,10 @@ func (c *TieredCache) unavailableError() error {
 	}
 
 	c.stateErrMu.RLock()
+	if healthState(c.healthState.Load()) != degraded {
+		c.stateErrMu.RUnlock()
+		return nil
+	}
 	err := c.stateErr
 	c.stateErrMu.RUnlock()
 	if err == nil {
@@ -234,12 +238,14 @@ func (c *TieredCache) transitionToDegraded(cause error) (bool, chan struct{}) {
 	if cause == nil {
 		cause = ErrL2Unavailable
 	}
+
+	c.stateErrMu.Lock()
 	if !c.healthState.CompareAndSwap(uint32(healthy), uint32(degraded)) {
+		c.stateErrMu.Unlock()
 		return false, nil
 	}
 
 	flushDone := make(chan struct{})
-	c.stateErrMu.Lock()
 	c.stateErr = cause
 	c.degradedFlushDone = flushDone
 	c.stateErrMu.Unlock()
@@ -267,14 +273,15 @@ func (c *TieredCache) flushL1Locked(flushDone chan struct{}) {
 }
 
 func (c *TieredCache) enterHealthy() {
+	c.stateErrMu.Lock()
+	defer c.stateErrMu.Unlock()
+
 	if !c.healthState.CompareAndSwap(uint32(degraded), uint32(healthy)) {
 		return
 	}
 
-	c.stateErrMu.Lock()
 	c.stateErr = nil
 	c.degradedFlushDone = nil
-	c.stateErrMu.Unlock()
 }
 
 func (c *TieredCache) waitForL1Flush() {
