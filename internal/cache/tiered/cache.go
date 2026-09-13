@@ -146,6 +146,7 @@ type TieredCache struct {
 	l2 cachecontract.Cache
 
 	queue                 *writeQueue
+	pending               *pendingWrites
 	workerDone            chan struct{}
 	writeQueueWaitTimeout time.Duration
 	onWriteError          func(key string, err error)
@@ -176,6 +177,7 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 		l1:                    l1,
 		l2:                    l2,
 		queue:                 newWriteQueue(config.WriteQueueCapacity, config.WriteQueueMaxBytes),
+		pending:               newPendingWrites(),
 		workerDone:            make(chan struct{}),
 		writeQueueWaitTimeout: config.WriteQueueWaitTimeout,
 		onWriteError:          config.OnWriteError,
@@ -193,15 +195,31 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 		}
 
 		version := c.mutationVersion.Load()
-		value, ttl, err = c.l2.Get(key)
-		if err != nil || value == nil {
-			return value, ttl, err
+		if err := c.pending.wait(key); err != nil {
+			return nil, 0, err
 		}
+		if c.mutationVersion.Load() != version {
+			continue
+		}
+
+		value, ttl, l2Err := c.l2.Get(key)
 
 		c.mutationMu.Lock()
 		if c.mutationVersion.Load() != version {
 			c.mutationMu.Unlock()
 			continue
+		}
+
+		pending, pendingErr := c.pending.status(key)
+		if pending || pendingErr != nil {
+			c.mutationMu.Unlock()
+			if pending {
+				if err := c.pending.wait(key); err != nil {
+					return nil, 0, err
+				}
+				continue
+			}
+			return nil, 0, pendingErr
 		}
 
 		currentValue, currentTTL, currentErr := c.l1.Get(key)
@@ -212,6 +230,15 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 		if currentValue != nil {
 			c.mutationMu.Unlock()
 			return currentValue, currentTTL, nil
+		}
+
+		if l2Err != nil {
+			c.mutationMu.Unlock()
+			return nil, 0, l2Err
+		}
+		if value == nil {
+			c.mutationMu.Unlock()
+			return nil, 0, nil
 		}
 
 		if ttl > 0 {
@@ -255,6 +282,9 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	c.queue.waitEmpty()
 	l1Removed, l1Err := c.l1.Forget(key)
 	l2Removed, l2Err := c.l2.Forget(key)
+	if l2Err == nil {
+		c.pending.clear(key)
+	}
 	return l1Removed || l2Removed, errors.Join(l1Err, l2Err)
 }
 
@@ -287,6 +317,9 @@ func (c *TieredCache) Flush() (bool, error) {
 	c.queue.waitEmpty()
 	l1Flushed, l1Err := c.l1.Flush()
 	l2Flushed, l2Err := c.l2.Flush()
+	if l2Err == nil {
+		c.pending.clearAll()
+	}
 	return l1Flushed && l2Flushed, errors.Join(l1Err, l2Err)
 }
 
@@ -327,7 +360,9 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 		return stored, err
 	}
 
+	c.pending.add(operation.key)
 	if err := c.queue.enqueue(operation, c.writeQueueWaitTimeout); err != nil {
+		c.pending.cancel(operation.key)
 		return false, err
 	}
 	return true, nil
@@ -348,6 +383,7 @@ func (c *TieredCache) runWriter() {
 		} else {
 			_, err = c.l2.Set(operation.key, operation.value, operation.ttl)
 		}
+		c.pending.complete(operation.key, err)
 		c.queue.complete(operation)
 		if err != nil && c.onWriteError != nil {
 			c.onWriteError(operation.key, err)
