@@ -174,6 +174,7 @@ type TieredCache struct {
 	dirtyMu           sync.Mutex
 	dirtyKeys         map[string]struct{}
 	mutationMu        sync.Mutex
+	lifecycleMu       sync.RWMutex
 	mutationVersion   atomic.Uint64
 	closeOnce         sync.Once
 	closeErr          error
@@ -349,6 +350,16 @@ func (c *TieredCache) runRecovery() {
 }
 
 func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
+	c.lifecycleMu.RLock()
+	defer c.lifecycleMu.RUnlock()
+
+	c.mutationMu.Lock()
+	if c.closed {
+		c.mutationMu.Unlock()
+		return nil, 0, ErrClosed
+	}
+	c.mutationMu.Unlock()
+
 	for {
 		if err := c.unavailableError(); err != nil {
 			return nil, 0, err
@@ -566,6 +577,9 @@ func (c *TieredCache) Flush() (bool, error) {
 
 func (c *TieredCache) Close() error {
 	c.closeOnce.Do(func() {
+		c.lifecycleMu.Lock()
+		defer c.lifecycleMu.Unlock()
+
 		c.mutationMu.Lock()
 		c.closed = true
 		c.mutationVersion.Add(1)

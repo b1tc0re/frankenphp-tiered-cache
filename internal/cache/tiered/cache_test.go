@@ -382,6 +382,139 @@ func TestTieredCacheCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestTieredCacheOperationsAfterCloseReturnErrClosed(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	if err := cache.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "Get",
+			call: func() error {
+				_, _, err := cache.Get("key")
+				return err
+			},
+		},
+		{
+			name: "Set",
+			call: func() error {
+				_, err := cache.Set("key", []byte("value"), time.Minute)
+				return err
+			},
+		},
+		{
+			name: "Forever",
+			call: func() error {
+				_, err := cache.Forever("key", []byte("value"))
+				return err
+			},
+		},
+		{
+			name: "Forget",
+			call: func() error {
+				_, err := cache.Forget("key")
+				return err
+			},
+		},
+		{
+			name: "Touch",
+			call: func() error {
+				_, err := cache.Touch("key", time.Minute)
+				return err
+			},
+		},
+		{
+			name: "Flush",
+			call: func() error {
+				_, err := cache.Flush()
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); !errors.Is(err, ErrClosed) {
+				t.Fatalf("error = %v, want ErrClosed", err)
+			}
+		})
+	}
+	if got := l1.getCount(); got != 0 {
+		t.Fatalf("L1 Get() calls after Close() = %d, want 0", got)
+	}
+	if got := l2.getCount(); got != 0 {
+		t.Fatalf("L2 Get() calls after Close() = %d, want 0", got)
+	}
+}
+
+func TestTieredCacheCloseWaitsForActiveGet(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l1.values["key"] = []byte("value")
+	l1.ttls["key"] = time.Minute
+	getStarted := make(chan struct{})
+	releaseGet := make(chan struct{})
+	l1.getHook = func() {
+		close(getStarted)
+		<-releaseGet
+	}
+
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+	getDone := make(chan struct {
+		value []byte
+		ttl   time.Duration
+		err   error
+	}, 1)
+	go func() {
+		value, ttl, err := cache.Get("key")
+		getDone <- struct {
+			value []byte
+			ttl   time.Duration
+			err   error
+		}{value: value, ttl: ttl, err: err}
+	}()
+
+	select {
+	case <-getStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Get() did not reach L1")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- cache.Close()
+	}()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close() returned before active Get(): %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseGet)
+	select {
+	case result := <-getDone:
+		if string(result.value) != "value" || result.ttl != time.Minute || result.err != nil {
+			t.Fatalf("Get() = (%q, %v, %v), want (value, %v, nil)", result.value, result.ttl, result.err, time.Minute)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Get() did not finish")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not finish after Get()")
+	}
+}
+
 func TestTieredCacheEnterHealthySerializesStateCleanup(t *testing.T) {
 	cache := &TieredCache{}
 	oldErr := errors.New("old L2 error")
