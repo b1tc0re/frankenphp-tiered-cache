@@ -172,11 +172,14 @@ func TestTieredCacheSetDoesNotWaitForL2(t *testing.T) {
 func TestTieredCacheSetWaitsForQueueSpaceUntilTimeout(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
+	l2.values["second"] = []byte("old")
+	l2.ttls["second"] = time.Minute
 	l2.setStarted = make(chan struct{}, 1)
 	l2.releaseSet = make(chan struct{})
 	cache := newTestTieredCache(t, Config{
 		WriteQueueCapacity:    1,
 		WriteQueueWaitTimeout: 20 * time.Millisecond,
+		RecoveryInterval:      10 * time.Millisecond,
 	}, l1, l2)
 
 	if ok, err := cache.Set("first", []byte("1"), time.Minute); err != nil || !ok {
@@ -197,6 +200,20 @@ func TestTieredCacheSetWaitsForQueueSpaceUntilTimeout(t *testing.T) {
 	}
 
 	close(l2.releaseSet)
+	deadline := time.Now().Add(time.Second)
+	for {
+		value, _, err := l2.Get("second")
+		if err != nil {
+			t.Fatalf("L2 Get(second) = %v", err)
+		}
+		if value == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queue-timeout dirty key was not removed during recovery")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if err := cache.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}

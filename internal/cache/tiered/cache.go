@@ -164,19 +164,20 @@ type TieredCache struct {
 	onWriteError          func(key string, err error)
 	now                   func() time.Time
 
-	healthState     atomic.Uint32
-	stateErrMu      sync.RWMutex
-	stateErr        error
-	recoveryWake    chan struct{}
-	recoveryStop    chan struct{}
-	recoveryDone    chan struct{}
-	dirtyMu         sync.Mutex
-	dirtyKeys       map[string]struct{}
-	mutationMu      sync.Mutex
-	mutationVersion atomic.Uint64
-	closeOnce       sync.Once
-	closeErr        error
-	closed          bool
+	healthState       atomic.Uint32
+	stateErrMu        sync.RWMutex
+	stateErr          error
+	degradedFlushDone chan struct{}
+	recoveryWake      chan struct{}
+	recoveryStop      chan struct{}
+	recoveryDone      chan struct{}
+	dirtyMu           sync.Mutex
+	dirtyKeys         map[string]struct{}
+	mutationMu        sync.Mutex
+	mutationVersion   atomic.Uint64
+	closeOnce         sync.Once
+	closeErr          error
+	closed            bool
 }
 
 var _ cachecontract.Cache = (*TieredCache)(nil)
@@ -229,32 +230,39 @@ func (c *TieredCache) unavailableError() error {
 	return fmt.Errorf("%w: %w", ErrL2Unavailable, err)
 }
 
-func (c *TieredCache) enterDegraded(cause error) {
+func (c *TieredCache) transitionToDegraded(cause error) (bool, chan struct{}) {
 	if cause == nil {
 		cause = ErrL2Unavailable
 	}
 	if !c.healthState.CompareAndSwap(uint32(healthy), uint32(degraded)) {
-		return
+		return false, nil
 	}
 
+	flushDone := make(chan struct{})
 	c.stateErrMu.Lock()
 	c.stateErr = cause
+	c.degradedFlushDone = flushDone
 	c.stateErrMu.Unlock()
-
-	c.mutationMu.Lock()
-	if !c.closed {
-		_, flushErr := c.l1.Flush()
-		if flushErr != nil {
-			c.stateErrMu.Lock()
-			c.stateErr = errors.Join(cause, flushErr)
-			c.stateErrMu.Unlock()
-		}
-	}
-	c.mutationMu.Unlock()
 
 	select {
 	case c.recoveryWake <- struct{}{}:
 	default:
+	}
+	return true, flushDone
+}
+
+func (c *TieredCache) flushL1Locked(flushDone chan struct{}) {
+	defer close(flushDone)
+
+	if c.closed {
+		return
+	}
+
+	_, flushErr := c.l1.Flush()
+	if flushErr != nil {
+		c.stateErrMu.Lock()
+		c.stateErr = errors.Join(c.stateErr, flushErr)
+		c.stateErrMu.Unlock()
 	}
 }
 
@@ -265,7 +273,17 @@ func (c *TieredCache) enterHealthy() {
 
 	c.stateErrMu.Lock()
 	c.stateErr = nil
+	c.degradedFlushDone = nil
 	c.stateErrMu.Unlock()
+}
+
+func (c *TieredCache) waitForL1Flush() {
+	c.stateErrMu.RLock()
+	flushDone := c.degradedFlushDone
+	c.stateErrMu.RUnlock()
+	if flushDone != nil {
+		<-flushDone
+	}
 }
 
 func (c *TieredCache) markDirty(key string) {
@@ -303,6 +321,10 @@ func (c *TieredCache) runRecovery() {
 			select {
 			case <-ticker.C:
 				c.queue.waitEmpty()
+				if healthState(c.healthState.Load()) != degraded {
+					continue
+				}
+				c.waitForL1Flush()
 				if healthState(c.healthState.Load()) != degraded {
 					continue
 				}
@@ -376,8 +398,11 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 		}
 
 		if l2Err != nil {
+			newlyDegraded, flushDone := c.transitionToDegraded(l2Err)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
 			c.mutationMu.Unlock()
-			c.enterDegraded(l2Err)
 			return nil, 0, c.unavailableError()
 		}
 		if value == nil {
@@ -433,6 +458,10 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	c.mutationVersion.Add(1)
 
 	c.queue.waitEmpty()
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
+	}
 	l1Removed, l1Err := c.l1.Forget(key)
 	l2Removed, l2Err := c.l2.Forget(key)
 	backendErr := errors.Join(l1Err, l2Err)
@@ -440,8 +469,11 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 		if l2Err != nil {
 			c.markDirty(key)
 		}
+		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
+		if newlyDegraded {
+			c.flushL1Locked(flushDone)
+		}
 		c.mutationMu.Unlock()
-		c.enterDegraded(backendErr)
 		return l1Removed || l2Removed, c.unavailableError()
 	}
 	if l2Err == nil {
@@ -468,6 +500,10 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	c.mutationVersion.Add(1)
 
 	c.queue.waitEmpty()
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
+	}
 	l1Touched, l1Err := c.l1.Touch(key, ttl)
 	l2Touched, l2Err := c.l2.Touch(key, ttl)
 	backendErr := errors.Join(l1Err, l2Err)
@@ -475,8 +511,11 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		if l2Err != nil {
 			c.markDirty(key)
 		}
+		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
+		if newlyDegraded {
+			c.flushL1Locked(flushDone)
+		}
 		c.mutationMu.Unlock()
-		c.enterDegraded(backendErr)
 		return l1Touched || l2Touched, c.unavailableError()
 	}
 	c.mutationMu.Unlock()
@@ -496,12 +535,19 @@ func (c *TieredCache) Flush() (bool, error) {
 	c.mutationVersion.Add(1)
 
 	c.queue.waitEmpty()
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
+	}
 	l1Flushed, l1Err := c.l1.Flush()
 	l2Flushed, l2Err := c.l2.Flush()
 	backendErr := errors.Join(l1Err, l2Err)
 	if backendErr != nil {
+		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
+		if newlyDegraded {
+			c.flushL1Locked(flushDone)
+		}
 		c.mutationMu.Unlock()
-		c.enterDegraded(backendErr)
 		return false, c.unavailableError()
 	}
 	if l2Err == nil {
@@ -559,11 +605,16 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 	c.pending.add(operation.key)
 	if err := c.queue.enqueue(operation, c.writeQueueWaitTimeout); err != nil {
 		c.pending.cancel(operation.key)
-		c.mutationMu.Unlock()
 		if errors.Is(err, ErrWriteQueueTimeout) {
-			c.enterDegraded(err)
+			c.markDirty(operation.key)
+			newlyDegraded, flushDone := c.transitionToDegraded(err)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
 			return false, c.unavailableError()
 		}
+		c.mutationMu.Unlock()
 		return false, err
 	}
 	c.mutationMu.Unlock()
@@ -590,13 +641,20 @@ func (c *TieredCache) runWriter() {
 				_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
 			}
 		}
+		newlyDegraded := false
+		var flushDone chan struct{}
 		if err != nil {
 			c.markDirty(operation.key)
+			newlyDegraded, flushDone = c.transitionToDegraded(err)
 		}
 		c.pending.complete(operation.key)
 		c.queue.complete(operation)
+		if newlyDegraded {
+			c.mutationMu.Lock()
+			c.flushL1Locked(flushDone)
+			c.mutationMu.Unlock()
+		}
 		if err != nil {
-			c.enterDegraded(err)
 			if c.onWriteError != nil {
 				c.onWriteError(operation.key, err)
 			}

@@ -109,6 +109,59 @@ func TestTieredCachePendingWriteFailureDoesNotExposeStaleL2(t *testing.T) {
 	}
 }
 
+func TestTieredCachePendingWriteFailureDegradesBeforeGetWakes(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.values["key"] = []byte("old")
+	l2.ttls["key"] = time.Minute
+	l2.setErr = errors.New("redis unavailable")
+	l2.setStarted = make(chan struct{}, 1)
+	l2.releaseSet = make(chan struct{})
+
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+	if ok, err := cache.Set("key", []byte("new"), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	select {
+	case <-l2.setStarted:
+	case <-time.After(time.Second):
+		t.Fatal("L2 worker did not start write")
+	}
+	if removed, err := l1.Forget("key"); err != nil || !removed {
+		t.Fatalf("simulated L1 eviction = (%t, %v), want (true, nil)", removed, err)
+	}
+
+	type getResult struct {
+		value []byte
+		ttl   time.Duration
+		err   error
+	}
+	getDone := make(chan getResult, 1)
+	go func() {
+		value, ttl, err := cache.Get("key")
+		getDone <- getResult{value: value, ttl: ttl, err: err}
+	}()
+
+	select {
+	case result := <-getDone:
+		t.Fatalf("Get() returned before pending write completed: %+v", result)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(l2.releaseSet)
+	select {
+	case result := <-getDone:
+		if result.value != nil || result.ttl != 0 || !errors.Is(result.err, ErrL2Unavailable) {
+			t.Fatalf("Get() = (%q, %v, %v), want (nil, 0, ErrL2Unavailable)", result.value, result.ttl, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Get() did not finish after pending write completed")
+	}
+	if got := l2.getCount(); got != 0 {
+		t.Fatalf("L2 Get() calls after failed pending write = %d, want 0", got)
+	}
+}
+
 func TestTieredCacheRecoversAfterL2BecomesAvailable(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
