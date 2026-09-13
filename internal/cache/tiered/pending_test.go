@@ -112,8 +112,11 @@ func TestTieredCachePendingWriteFailureDoesNotExposeStaleL2(t *testing.T) {
 func TestTieredCacheRecoversAfterL2BecomesAvailable(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
+	l2.values["key"] = []byte("old")
+	l2.ttls["key"] = time.Minute
 	wantErr := errors.New("redis unavailable")
 	l2.setErrors(wantErr, wantErr)
+	l2.setForgetError(wantErr)
 
 	errorsReported := make(chan error, 1)
 	cache := newTestTieredCache(t, Config{
@@ -137,6 +140,14 @@ func TestTieredCacheRecoversAfterL2BecomesAvailable(t *testing.T) {
 
 	l2.setErrors(nil, nil)
 	deadline := time.Now().Add(time.Second)
+	for l2.forgetCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("recovery did not attempt to clean dirty L2 keys")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	l2.setForgetError(nil)
+
 	for {
 		ok, err := cache.Set("recovered", []byte("value"), time.Minute)
 		if ok && err == nil {
@@ -157,5 +168,8 @@ func TestTieredCacheRecoversAfterL2BecomesAvailable(t *testing.T) {
 	}
 	if string(value) != "value" || ttl != time.Minute {
 		t.Fatalf("recovered L1 = (%q, %v), want (value, %v)", value, ttl, time.Minute)
+	}
+	if value, _, err := l2.Get("key"); err != nil || value != nil {
+		t.Fatalf("dirty L2 value after recovery = (%q, %v), want (nil, nil)", value, err)
 	}
 }

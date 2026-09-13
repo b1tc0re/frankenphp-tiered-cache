@@ -150,7 +150,8 @@ func (q *writeQueue) close() {
 //
 // L2 writes from Set and Forever are processed by one FIFO worker. The worker
 // keeps operation ordering deterministic; synchronous invalidation operations
-// wait for all earlier queued writes before touching either backend.
+// wait for all earlier queued writes before touching either backend. When an
+// L2 key mutation fails, its key remains dirty until recovery removes it.
 type TieredCache struct {
 	l1 cachecontract.Cache
 	l2 cachecontract.Cache
@@ -169,6 +170,8 @@ type TieredCache struct {
 	recoveryWake    chan struct{}
 	recoveryStop    chan struct{}
 	recoveryDone    chan struct{}
+	dirtyMu         sync.Mutex
+	dirtyKeys       map[string]struct{}
 	mutationMu      sync.Mutex
 	mutationVersion atomic.Uint64
 	closeOnce       sync.Once
@@ -204,6 +207,7 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 		recoveryWake:          make(chan struct{}, 1),
 		recoveryStop:          make(chan struct{}),
 		recoveryDone:          make(chan struct{}),
+		dirtyKeys:             make(map[string]struct{}),
 	}
 	go cache.runWriter()
 	go cache.runRecovery()
@@ -264,6 +268,26 @@ func (c *TieredCache) enterHealthy() {
 	c.stateErrMu.Unlock()
 }
 
+func (c *TieredCache) markDirty(key string) {
+	// A key is retained only until the next successful recovery cleanup.
+	c.dirtyMu.Lock()
+	c.dirtyKeys[key] = struct{}{}
+	c.dirtyMu.Unlock()
+}
+
+func (c *TieredCache) recoverDirtyKeys() bool {
+	c.dirtyMu.Lock()
+	defer c.dirtyMu.Unlock()
+
+	for key := range c.dirtyKeys {
+		if _, err := c.l2.Forget(key); err != nil {
+			return false
+		}
+		delete(c.dirtyKeys, key)
+	}
+	return true
+}
+
 func (c *TieredCache) runRecovery() {
 	defer close(c.recoveryDone)
 
@@ -283,7 +307,7 @@ func (c *TieredCache) runRecovery() {
 					continue
 				}
 
-				if _, _, err := c.l2.Get(recoveryProbeKey); err == nil {
+				if _, _, err := c.l2.Get(recoveryProbeKey); err == nil && c.recoverDirtyKeys() {
 					c.enterHealthy()
 				}
 			case <-c.recoveryStop:
@@ -413,6 +437,9 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	l2Removed, l2Err := c.l2.Forget(key)
 	backendErr := errors.Join(l1Err, l2Err)
 	if backendErr != nil {
+		if l2Err != nil {
+			c.markDirty(key)
+		}
 		c.mutationMu.Unlock()
 		c.enterDegraded(backendErr)
 		return l1Removed || l2Removed, c.unavailableError()
@@ -445,6 +472,9 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	l2Touched, l2Err := c.l2.Touch(key, ttl)
 	backendErr := errors.Join(l1Err, l2Err)
 	if backendErr != nil {
+		if l2Err != nil {
+			c.markDirty(key)
+		}
 		c.mutationMu.Unlock()
 		c.enterDegraded(backendErr)
 		return l1Touched || l2Touched, c.unavailableError()
@@ -559,6 +589,9 @@ func (c *TieredCache) runWriter() {
 			} else {
 				_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
 			}
+		}
+		if err != nil {
+			c.markDirty(operation.key)
 		}
 		c.pending.complete(operation.key)
 		c.queue.complete(operation)

@@ -307,6 +307,47 @@ func TestTieredCacheSynchronousOperationsUseBothLevels(t *testing.T) {
 	}
 }
 
+func TestTieredCacheFlushFailureIsNotRetriedDuringRecovery(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l1.values["key"] = []byte("value")
+	l2.values["key"] = []byte("value")
+	wantErr := errors.New("redis flush failed")
+	l2.setFlushError(wantErr)
+
+	cache := newTestTieredCache(t, Config{RecoveryInterval: 10 * time.Millisecond}, l1, l2)
+
+	flushed, err := cache.Flush()
+	if flushed || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("Flush() = (%t, %v), want (false, L2 unavailable wrapping %v)", flushed, err, wantErr)
+	}
+	if value, _, _ := l1.Get("key"); value != nil {
+		t.Fatalf("L1 key after failed Flush() = %q, want nil", value)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		ok, err := cache.Set("after-recovery", []byte("value"), time.Minute)
+		if ok && err == nil {
+			break
+		}
+		if !errors.Is(err, ErrL2Unavailable) {
+			t.Fatalf("Set() during recovery = (%t, %v), want temporary L2 unavailable", ok, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("TieredCache did not recover after failed Flush()")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if got := l2.flushCount(); got != 1 {
+		t.Fatalf("L2 Flush() calls = %d, want 1", got)
+	}
+	if value, _, err := l2.Get("key"); err != nil || string(value) != "value" {
+		t.Fatalf("L2 key after failed Flush() = (%q, %v), want (value, nil)", value, err)
+	}
+}
+
 func TestTieredCacheCloseIsIdempotent(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
@@ -342,10 +383,15 @@ type fakeCache struct {
 	values map[string][]byte
 	ttls   map[string]time.Duration
 
-	getCalls int
-	getHook  func()
-	getErr   error
-	setErr   error
+	getCalls    int
+	getHook     func()
+	getErr      error
+	setErr      error
+	forgetErr   error
+	touchErr    error
+	flushErr    error
+	forgetCalls int
+	flushCalls  int
 
 	setStarted chan struct{}
 	releaseSet chan struct{}
@@ -433,6 +479,10 @@ func (f *fakeCache) set(key string, keyValue []byte, ttl time.Duration, forever 
 func (f *fakeCache) Forget(key string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.forgetCalls++
+	if f.forgetErr != nil {
+		return false, f.forgetErr
+	}
 	if _, ok := f.values[key]; !ok {
 		return false, nil
 	}
@@ -444,6 +494,9 @@ func (f *fakeCache) Forget(key string) (bool, error) {
 func (f *fakeCache) Touch(key string, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.touchErr != nil {
+		return false, f.touchErr
+	}
 	if _, ok := f.values[key]; !ok {
 		return false, nil
 	}
@@ -454,6 +507,10 @@ func (f *fakeCache) Touch(key string, ttl time.Duration) (bool, error) {
 func (f *fakeCache) Flush() (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.flushCalls++
+	if f.flushErr != nil {
+		return false, f.flushErr
+	}
 	f.values = make(map[string][]byte)
 	f.ttls = make(map[string]time.Duration)
 	return true, nil
@@ -476,4 +533,28 @@ func (f *fakeCache) closeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closeCalls
+}
+
+func (f *fakeCache) setForgetError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forgetErr = err
+}
+
+func (f *fakeCache) setFlushError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.flushErr = err
+}
+
+func (f *fakeCache) forgetCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.forgetCalls
+}
+
+func (f *fakeCache) flushCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.flushCalls
 }
