@@ -3,8 +3,7 @@ package tiered
 import "sync"
 
 type pendingWriteState struct {
-	count   int
-	lastErr error
+	count int
 }
 
 type pendingWrites struct {
@@ -42,13 +41,13 @@ func (p *pendingWrites) cancel(key string) {
 	if state.count > 0 {
 		state.count--
 	}
-	if state.count == 0 && state.lastErr == nil {
+	if state.count == 0 {
 		delete(p.states, key)
 	}
 	p.cond.Broadcast()
 }
 
-func (p *pendingWrites) complete(key string, err error) {
+func (p *pendingWrites) complete(key string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -59,8 +58,7 @@ func (p *pendingWrites) complete(key string, err error) {
 	if state.count > 0 {
 		state.count--
 	}
-	state.lastErr = err
-	if state.count == 0 && err == nil {
+	if state.count == 0 {
 		delete(p.states, key)
 	}
 	p.cond.Broadcast()
@@ -76,7 +74,8 @@ func (p *pendingWrites) wait(key string) error {
 			return nil
 		}
 		if state.count == 0 {
-			return state.lastErr
+			delete(p.states, key)
+			return nil
 		}
 		p.cond.Wait()
 	}
@@ -90,7 +89,7 @@ func (p *pendingWrites) status(key string) (bool, error) {
 	if state == nil {
 		return false, nil
 	}
-	return state.count > 0, state.lastErr
+	return state.count > 0, nil
 }
 
 func (p *pendingWrites) clear(key string) {

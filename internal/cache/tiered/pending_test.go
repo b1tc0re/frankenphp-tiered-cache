@@ -96,8 +96,8 @@ func TestTieredCachePendingWriteFailureDoesNotExposeStaleL2(t *testing.T) {
 		t.Fatal("async write error was not reported")
 	}
 
-	if removed, err := l1.Forget("key"); err != nil || !removed {
-		t.Fatalf("simulated L1 eviction = (%t, %v), want (true, nil)", removed, err)
+	if value, _, err := l1.Get("key"); err != nil || value != nil {
+		t.Fatalf("L1 value after degraded transition = (%q, %v), want (nil, nil)", value, err)
 	}
 
 	value, ttl, err := cache.Get("key")
@@ -106,5 +106,56 @@ func TestTieredCachePendingWriteFailureDoesNotExposeStaleL2(t *testing.T) {
 	}
 	if got := l2.getCount(); got != 0 {
 		t.Fatalf("L2 Get() calls after failed pending write = %d, want 0", got)
+	}
+}
+
+func TestTieredCacheRecoversAfterL2BecomesAvailable(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	wantErr := errors.New("redis unavailable")
+	l2.setErrors(wantErr, wantErr)
+
+	errorsReported := make(chan error, 1)
+	cache := newTestTieredCache(t, Config{
+		RecoveryInterval: 10 * time.Millisecond,
+		OnWriteError: func(_ string, err error) {
+			errorsReported <- err
+		},
+	}, l1, l2)
+
+	if ok, err := cache.Set("key", []byte("value"), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	select {
+	case err := <-errorsReported:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("reported error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async write error was not reported")
+	}
+
+	l2.setErrors(nil, nil)
+	deadline := time.Now().Add(time.Second)
+	for {
+		ok, err := cache.Set("recovered", []byte("value"), time.Minute)
+		if ok && err == nil {
+			break
+		}
+		if !errors.Is(err, ErrL2Unavailable) {
+			t.Fatalf("recovery Set() = (%t, %v), want temporary ErrL2Unavailable", ok, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("TieredCache did not recover after L2 became available")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	value, ttl, err := l1.Get("recovered")
+	if err != nil {
+		t.Fatalf("recovered L1 Get() error = %v", err)
+	}
+	if string(value) != "value" || ttl != time.Minute {
+		t.Fatalf("recovered L1 = (%q, %v), want (value, %v)", value, ttl, time.Minute)
 	}
 }

@@ -18,6 +18,15 @@ type writeOperation struct {
 	forever   bool
 }
 
+const recoveryProbeKey = "\x00frankenphp-tiered-cache/recovery-probe"
+
+type healthState uint32
+
+const (
+	healthy healthState = iota
+	degraded
+)
+
 type writeQueue struct {
 	mu       sync.Mutex
 	notEmpty *sync.Cond
@@ -150,9 +159,16 @@ type TieredCache struct {
 	pending               *pendingWrites
 	workerDone            chan struct{}
 	writeQueueWaitTimeout time.Duration
+	recoveryInterval      time.Duration
 	onWriteError          func(key string, err error)
 	now                   func() time.Time
 
+	healthState     atomic.Uint32
+	stateErrMu      sync.RWMutex
+	stateErr        error
+	recoveryWake    chan struct{}
+	recoveryStop    chan struct{}
+	recoveryDone    chan struct{}
 	mutationMu      sync.Mutex
 	mutationVersion atomic.Uint64
 	closeOnce       sync.Once
@@ -182,24 +198,121 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 		pending:               newPendingWrites(),
 		workerDone:            make(chan struct{}),
 		writeQueueWaitTimeout: config.WriteQueueWaitTimeout,
+		recoveryInterval:      config.RecoveryInterval,
 		onWriteError:          config.OnWriteError,
 		now:                   time.Now,
+		recoveryWake:          make(chan struct{}, 1),
+		recoveryStop:          make(chan struct{}),
+		recoveryDone:          make(chan struct{}),
 	}
 	go cache.runWriter()
+	go cache.runRecovery()
 
 	return cache, nil
 }
 
+func (c *TieredCache) unavailableError() error {
+	if healthState(c.healthState.Load()) != degraded {
+		return nil
+	}
+
+	c.stateErrMu.RLock()
+	err := c.stateErr
+	c.stateErrMu.RUnlock()
+	if err == nil {
+		return ErrL2Unavailable
+	}
+	return fmt.Errorf("%w: %w", ErrL2Unavailable, err)
+}
+
+func (c *TieredCache) enterDegraded(cause error) {
+	if cause == nil {
+		cause = ErrL2Unavailable
+	}
+	if !c.healthState.CompareAndSwap(uint32(healthy), uint32(degraded)) {
+		return
+	}
+
+	c.stateErrMu.Lock()
+	c.stateErr = cause
+	c.stateErrMu.Unlock()
+
+	c.mutationMu.Lock()
+	if !c.closed {
+		_, flushErr := c.l1.Flush()
+		if flushErr != nil {
+			c.stateErrMu.Lock()
+			c.stateErr = errors.Join(cause, flushErr)
+			c.stateErrMu.Unlock()
+		}
+	}
+	c.mutationMu.Unlock()
+
+	select {
+	case c.recoveryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *TieredCache) enterHealthy() {
+	if !c.healthState.CompareAndSwap(uint32(degraded), uint32(healthy)) {
+		return
+	}
+
+	c.stateErrMu.Lock()
+	c.stateErr = nil
+	c.stateErrMu.Unlock()
+}
+
+func (c *TieredCache) runRecovery() {
+	defer close(c.recoveryDone)
+
+	for {
+		select {
+		case <-c.recoveryWake:
+		case <-c.recoveryStop:
+			return
+		}
+
+		ticker := time.NewTicker(c.recoveryInterval)
+		for healthState(c.healthState.Load()) == degraded {
+			select {
+			case <-ticker.C:
+				c.queue.waitEmpty()
+				if healthState(c.healthState.Load()) != degraded {
+					continue
+				}
+
+				if _, _, err := c.l2.Get(recoveryProbeKey); err == nil {
+					c.enterHealthy()
+				}
+			case <-c.recoveryStop:
+				ticker.Stop()
+				return
+			}
+		}
+		ticker.Stop()
+	}
+}
+
 func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 	for {
+		if err := c.unavailableError(); err != nil {
+			return nil, 0, err
+		}
+
 		value, ttl, err := c.l1.Get(key)
 		if err != nil || value != nil {
+			if unavailable := c.unavailableError(); unavailable != nil {
+				return nil, 0, unavailable
+			}
 			return value, ttl, err
 		}
 
 		version := c.mutationVersion.Load()
-		if err := c.pending.wait(key); err != nil {
-			return nil, 0, err
+		_ = c.pending.wait(key)
+		if unavailable := c.unavailableError(); unavailable != nil {
+			return nil, 0, unavailable
 		}
 		if c.mutationVersion.Load() != version {
 			continue
@@ -213,16 +326,19 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 			continue
 		}
 
-		pending, pendingErr := c.pending.status(key)
-		if pending || pendingErr != nil {
+		if unavailable := c.unavailableError(); unavailable != nil {
 			c.mutationMu.Unlock()
-			if pending {
-				if err := c.pending.wait(key); err != nil {
-					return nil, 0, err
-				}
-				continue
+			return nil, 0, unavailable
+		}
+
+		pending, _ := c.pending.status(key)
+		if pending {
+			c.mutationMu.Unlock()
+			_ = c.pending.wait(key)
+			if unavailable := c.unavailableError(); unavailable != nil {
+				return nil, 0, unavailable
 			}
-			return nil, 0, pendingErr
+			continue
 		}
 
 		currentValue, currentTTL, currentErr := c.l1.Get(key)
@@ -237,7 +353,8 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 
 		if l2Err != nil {
 			c.mutationMu.Unlock()
-			return nil, 0, l2Err
+			c.enterDegraded(l2Err)
+			return nil, 0, c.unavailableError()
 		}
 		if value == nil {
 			c.mutationMu.Unlock()
@@ -281,19 +398,30 @@ func (c *TieredCache) Forever(key string, value []byte) (bool, error) {
 
 func (c *TieredCache) Forget(key string) (bool, error) {
 	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
 	if c.closed {
+		c.mutationMu.Unlock()
 		return false, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
 	}
 	c.mutationVersion.Add(1)
 
 	c.queue.waitEmpty()
 	l1Removed, l1Err := c.l1.Forget(key)
 	l2Removed, l2Err := c.l2.Forget(key)
+	backendErr := errors.Join(l1Err, l2Err)
+	if backendErr != nil {
+		c.mutationMu.Unlock()
+		c.enterDegraded(backendErr)
+		return l1Removed || l2Removed, c.unavailableError()
+	}
 	if l2Err == nil {
 		c.pending.clear(key)
 	}
-	return l1Removed || l2Removed, errors.Join(l1Err, l2Err)
+	c.mutationMu.Unlock()
+	return l1Removed || l2Removed, nil
 }
 
 func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
@@ -302,33 +430,55 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
 	if c.closed {
+		c.mutationMu.Unlock()
 		return false, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
 	}
 	c.mutationVersion.Add(1)
 
 	c.queue.waitEmpty()
 	l1Touched, l1Err := c.l1.Touch(key, ttl)
 	l2Touched, l2Err := c.l2.Touch(key, ttl)
-	return l1Touched || l2Touched, errors.Join(l1Err, l2Err)
+	backendErr := errors.Join(l1Err, l2Err)
+	if backendErr != nil {
+		c.mutationMu.Unlock()
+		c.enterDegraded(backendErr)
+		return l1Touched || l2Touched, c.unavailableError()
+	}
+	c.mutationMu.Unlock()
+	return l1Touched || l2Touched, nil
 }
 
 func (c *TieredCache) Flush() (bool, error) {
 	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
 	if c.closed {
+		c.mutationMu.Unlock()
 		return false, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
 	}
 	c.mutationVersion.Add(1)
 
 	c.queue.waitEmpty()
 	l1Flushed, l1Err := c.l1.Flush()
 	l2Flushed, l2Err := c.l2.Flush()
+	backendErr := errors.Join(l1Err, l2Err)
+	if backendErr != nil {
+		c.mutationMu.Unlock()
+		c.enterDegraded(backendErr)
+		return false, c.unavailableError()
+	}
 	if l2Err == nil {
 		c.pending.clearAll()
 	}
-	return l1Flushed && l2Flushed, errors.Join(l1Err, l2Err)
+	c.mutationMu.Unlock()
+	return l1Flushed && l2Flushed, nil
 }
 
 func (c *TieredCache) Close() error {
@@ -337,9 +487,11 @@ func (c *TieredCache) Close() error {
 		c.closed = true
 		c.mutationVersion.Add(1)
 		c.queue.close()
+		close(c.recoveryStop)
 		c.mutationMu.Unlock()
 
 		<-c.workerDone
+		<-c.recoveryDone
 		c.closeErr = errors.Join(c.l2.Close(), c.l1.Close())
 	})
 
@@ -348,12 +500,17 @@ func (c *TieredCache) Close() error {
 
 func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
 	if c.closed {
+		c.mutationMu.Unlock()
 		return false, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		c.mutationMu.Unlock()
+		return false, err
 	}
 	c.mutationVersion.Add(1)
 	if int64(len(operation.value)) > c.queue.maxBytes {
+		c.mutationMu.Unlock()
 		return false, ErrWriteQueueValueTooLarge
 	}
 
@@ -365,14 +522,21 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 		stored, err = c.l1.Set(operation.key, operation.value, operation.ttl)
 	}
 	if err != nil || !stored {
+		c.mutationMu.Unlock()
 		return stored, err
 	}
 
 	c.pending.add(operation.key)
 	if err := c.queue.enqueue(operation, c.writeQueueWaitTimeout); err != nil {
 		c.pending.cancel(operation.key)
+		c.mutationMu.Unlock()
+		if errors.Is(err, ErrWriteQueueTimeout) {
+			c.enterDegraded(err)
+			return false, c.unavailableError()
+		}
 		return false, err
 	}
+	c.mutationMu.Unlock()
 	return true, nil
 }
 
@@ -396,10 +560,13 @@ func (c *TieredCache) runWriter() {
 				_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
 			}
 		}
-		c.pending.complete(operation.key, err)
+		c.pending.complete(operation.key)
 		c.queue.complete(operation)
-		if err != nil && c.onWriteError != nil {
-			c.onWriteError(operation.key, err)
+		if err != nil {
+			c.enterDegraded(err)
+			if c.onWriteError != nil {
+				c.onWriteError(operation.key, err)
+			}
 		}
 	}
 }

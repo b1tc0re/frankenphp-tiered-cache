@@ -189,11 +189,11 @@ func TestTieredCacheSetWaitsForQueueSpaceUntilTimeout(t *testing.T) {
 	}
 
 	ok, err := cache.Set("second", []byte("2"), time.Minute)
-	if ok || !errors.Is(err, ErrWriteQueueTimeout) {
-		t.Fatalf("second Set() = (%t, %v), want (false, ErrWriteQueueTimeout)", ok, err)
+	if ok || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, ErrWriteQueueTimeout) {
+		t.Fatalf("second Set() = (%t, %v), want (false, ErrL2Unavailable wrapping ErrWriteQueueTimeout)", ok, err)
 	}
-	if value, _, _ := l1.Get("second"); string(value) != "2" {
-		t.Fatalf("L1 second value = %q, want 2", value)
+	if value, _, _ := l1.Get("second"); value != nil {
+		t.Fatalf("L1 second value = %q, want nil after degraded transition", value)
 	}
 
 	close(l2.releaseSet)
@@ -344,6 +344,7 @@ type fakeCache struct {
 
 	getCalls int
 	getHook  func()
+	getErr   error
 	setErr   error
 
 	setStarted chan struct{}
@@ -362,6 +363,11 @@ func newFakeCache() *fakeCache {
 func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 	f.mu.Lock()
 	f.getCalls++
+	getErr := f.getErr
+	if getErr != nil {
+		f.mu.Unlock()
+		return nil, 0, getErr
+	}
 	value, ok := f.values[key]
 	if !ok {
 		f.mu.Unlock()
@@ -384,6 +390,13 @@ func (f *fakeCache) Set(key string, keyValue []byte, ttl time.Duration) (bool, e
 
 func (f *fakeCache) Forever(key string, keyValue []byte) (bool, error) {
 	return f.set(key, keyValue, 0, true)
+}
+
+func (f *fakeCache) setErrors(getErr, setErr error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getErr = getErr
+	f.setErr = setErr
 }
 
 func (f *fakeCache) set(key string, keyValue []byte, ttl time.Duration, forever bool) (bool, error) {
