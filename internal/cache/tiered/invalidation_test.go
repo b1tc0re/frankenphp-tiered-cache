@@ -49,6 +49,46 @@ func TestTieredCacheCrossPodInvalidatesLocalL1(t *testing.T) {
 	}
 }
 
+func TestTieredCacheRemoteInvalidationCancelsInFlightWrite(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A := newFakeCache()
+	l1B := newFakeCache()
+	l2 := newFakeCache()
+	l2.setStarted = make(chan struct{}, 1)
+	l2.releaseSet = make(chan struct{})
+
+	cacheA := newTestTieredCacheWithInvalidation(t, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidation(t, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool {
+		return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load()
+	})
+
+	if ok, err := cacheA.Set("key", []byte("v1"), time.Minute); err != nil || !ok {
+		t.Fatalf("cache A Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	select {
+	case <-l2.setStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cache A L2 worker did not start write")
+	}
+
+	if _, err := cacheB.Forget("key"); err != nil {
+		t.Fatalf("cache B Forget() error = %v", err)
+	}
+	waitForInvalidationCondition(t, func() bool {
+		value, _, err := l1A.Get("key")
+		return err == nil && value == nil
+	})
+
+	close(l2.releaseSet)
+	waitForInvalidationCondition(t, func() bool {
+		return l2.forgetCount() >= 2
+	})
+	if value, _, err := l2.Get("key"); err != nil || value != nil {
+		t.Fatalf("stale L2 value after invalidated write = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
 func TestTieredCacheInvalidationOriginsAreUnique(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	cacheA := newTestTieredCacheWithInvalidation(t, newFakeCache(), newFakeCache(), bus)

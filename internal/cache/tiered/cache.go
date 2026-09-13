@@ -15,11 +15,18 @@ import (
 )
 
 type writeOperation struct {
-	key       string
-	value     []byte
-	ttl       time.Duration
-	expiresAt time.Time
-	forever   bool
+	key             string
+	value           []byte
+	ttl             time.Duration
+	expiresAt       time.Time
+	forever         bool
+	keyGeneration   uint64
+	flushGeneration uint64
+}
+
+type keyGenerationState struct {
+	generation uint64
+	pending    int
 }
 
 const recoveryProbeKey = "\x00frankenphp-tiered-cache/recovery-probe"
@@ -193,6 +200,9 @@ type TieredCache struct {
 	mutationMu         sync.Mutex
 	lifecycleMu        sync.RWMutex
 	mutationVersion    atomic.Uint64
+	flushGeneration    atomic.Uint64
+	generationMu       sync.Mutex
+	keyGenerations     map[string]keyGenerationState
 	invalidationBus    cacheinvalidation.Bus
 	invalidationOrigin string
 	invalidationReady  atomic.Bool
@@ -250,6 +260,7 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		recoveryStop:          make(chan struct{}),
 		recoveryDone:          make(chan struct{}),
 		dirtyKeys:             make(map[string]struct{}),
+		keyGenerations:        make(map[string]keyGenerationState),
 		invalidationBus:       bus,
 		invalidationOrigin:    invalidationOrigin,
 		invalidationDone:      make(chan struct{}),
@@ -358,6 +369,64 @@ func (c *TieredCache) markDirty(key string) {
 	c.dirtyMu.Lock()
 	c.dirtyKeys[key] = struct{}{}
 	c.dirtyMu.Unlock()
+}
+
+// beginWriteGeneration registers an async write before it enters the queue.
+// The pending count keeps a generation entry alive while a worker may still
+// compare against it, without retaining every key invalidated over the cache
+// lifetime.
+func (c *TieredCache) beginWriteGeneration(key string) uint64 {
+	c.generationMu.Lock()
+	defer c.generationMu.Unlock()
+
+	state := c.keyGenerations[key]
+	state.pending++
+	c.keyGenerations[key] = state
+	return state.generation
+}
+
+func (c *TieredCache) endWriteGeneration(key string) {
+	c.generationMu.Lock()
+	defer c.generationMu.Unlock()
+
+	state, ok := c.keyGenerations[key]
+	if !ok {
+		return
+	}
+	state.pending--
+	if state.pending <= 0 {
+		delete(c.keyGenerations, key)
+		return
+	}
+	c.keyGenerations[key] = state
+}
+
+func (c *TieredCache) bumpKeyGeneration(key string) {
+	c.generationMu.Lock()
+	defer c.generationMu.Unlock()
+
+	state, ok := c.keyGenerations[key]
+	if !ok {
+		// There is no in-flight write to invalidate. Avoid retaining a
+		// tombstone for a key that may never be used again.
+		return
+	}
+	state.generation++
+	c.keyGenerations[key] = state
+}
+
+func (c *TieredCache) keyGeneration(key string) uint64 {
+	c.generationMu.Lock()
+	defer c.generationMu.Unlock()
+
+	return c.keyGenerations[key].generation
+}
+
+func (c *TieredCache) writeOperationStale(operation writeOperation) bool {
+	if c.flushGeneration.Load() != operation.flushGeneration {
+		return true
+	}
+	return c.keyGeneration(operation.key) != operation.keyGeneration
 }
 
 func (c *TieredCache) publishKeyInvalidation(key string) error {
@@ -562,9 +631,11 @@ func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
 	c.mutationVersion.Add(1)
 	switch event.Type {
 	case cacheinvalidation.EventTypeInvalidate:
+		c.bumpKeyGeneration(event.Key)
 		_, err := c.l1.Forget(event.Key)
 		return err
 	case cacheinvalidation.EventTypeFlush:
+		c.flushGeneration.Add(1)
 		_, err := c.l1.Flush()
 		return err
 	default:
@@ -871,9 +942,12 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 		return stored, err
 	}
 
+	operation.keyGeneration = c.beginWriteGeneration(operation.key)
+	operation.flushGeneration = c.flushGeneration.Load()
 	c.pending.add(operation.key)
 	if err := c.queue.enqueue(operation, c.writeQueueWaitTimeout); err != nil {
 		c.pending.cancel(operation.key)
+		c.endWriteGeneration(operation.key)
 		if errors.Is(err, ErrWriteQueueTimeout) {
 			c.markDirty(operation.key)
 			newlyDegraded, flushDone := c.transitionToDegraded(err)
@@ -899,19 +973,32 @@ func (c *TieredCache) runWriter() {
 			return
 		}
 
+		stale := c.writeOperationStale(operation)
 		var err error
-		if operation.forever {
-			_, err = c.l2.Forever(operation.key, operation.value)
-		} else {
-			remainingTTL := operation.expiresAt.Sub(c.now())
-			if remainingTTL <= 0 {
-				_, err = c.l2.Forget(operation.key)
+		if !stale {
+			if operation.forever {
+				_, err = c.l2.Forever(operation.key, operation.value)
 			} else {
-				_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
+				remainingTTL := operation.expiresAt.Sub(c.now())
+				if remainingTTL <= 0 {
+					_, err = c.l2.Forget(operation.key)
+				} else {
+					_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
+				}
 			}
 		}
-		if err == nil {
-			err = c.publishKeyInvalidation(operation.key)
+		if err == nil && !stale {
+			if c.writeOperationStale(operation) {
+				_, err = c.l2.Forget(operation.key)
+				if err == nil {
+					// The generation change already invalidated peers, but
+					// publish again after cleanup so a concurrent newer write
+					// cannot remain warm in another pod's L1.
+					err = c.publishKeyInvalidation(operation.key)
+				}
+			} else {
+				err = c.publishKeyInvalidation(operation.key)
+			}
 		}
 		newlyDegraded := false
 		var flushDone chan struct{}
@@ -920,6 +1007,7 @@ func (c *TieredCache) runWriter() {
 			newlyDegraded, flushDone = c.transitionToDegraded(err)
 		}
 		c.pending.complete(operation.key)
+		c.endWriteGeneration(operation.key)
 		c.queue.complete(operation)
 		if newlyDegraded {
 			c.mutationMu.Lock()
