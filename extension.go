@@ -16,19 +16,37 @@ import (
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 	"github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/memory"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 var phpMemoryCache cachecontract.Cache
 
-type phpMemoryObserver struct{}
+const phpMemoryPressureLogInterval = 10 * time.Second
 
-func (phpMemoryObserver) OnEviction(memory.EvictionEvent) {
-	caddy.Log().Named("franken_cache").Warn("MemoryCache evicted a live entry due to memory pressure")
+type phpMemoryObserver struct {
+	reporter *observability.PressureReporter
+}
+
+func (o *phpMemoryObserver) OnEviction(event memory.EvictionEvent) {
+	o.reporter.Observe(event.Bytes)
 }
 
 func init() {
-	cache, err := memory.New(memory.Config{Observer: phpMemoryObserver{}})
+	reporter, err := observability.NewPressureReporter(phpMemoryPressureLogInterval, func(summary observability.PressureSummary) {
+		caddy.Log().Named("franken_cache").Warn(fmt.Sprintf(
+			"MemoryCache evicted live entries due to memory pressure: evicted_entries=%d evicted_bytes=%d window=%s",
+			summary.EvictedEntries,
+			summary.EvictedBytes,
+			summary.Window,
+		))
+	})
 	if err != nil {
+		panic(fmt.Sprintf("franken_cache: initialize pressure reporter: %v", err))
+	}
+
+	cache, err := memory.New(memory.Config{Observer: &phpMemoryObserver{reporter: reporter}})
+	if err != nil {
+		reporter.Close()
 		panic(fmt.Sprintf("franken_cache: initialize MemoryCache: %v", err))
 	}
 	phpMemoryCache = cache

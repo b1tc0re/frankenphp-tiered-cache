@@ -1,0 +1,118 @@
+package observability
+
+import (
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestPressureReporterAggregatesEvents(t *testing.T) {
+	summaries := make(chan PressureSummary, 1)
+	reporter := newTestPressureReporter(t, 10*time.Millisecond, func(summary PressureSummary) {
+		summaries <- summary
+	})
+
+	reporter.Observe(12)
+	reporter.Observe(30)
+
+	select {
+	case summary := <-summaries:
+		if summary.EvictedEntries != 2 {
+			t.Fatalf("evicted entries = %d, want 2", summary.EvictedEntries)
+		}
+		if summary.EvictedBytes != 42 {
+			t.Fatalf("evicted bytes = %d, want 42", summary.EvictedBytes)
+		}
+		if summary.Window != 10*time.Millisecond {
+			t.Fatalf("window = %s, want 10ms", summary.Window)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pressure summary")
+	}
+}
+
+func TestPressureReporterDoesNotReportEmptyWindows(t *testing.T) {
+	summaries := make(chan PressureSummary, 1)
+	newTestPressureReporter(t, 10*time.Millisecond, func(summary PressureSummary) {
+		summaries <- summary
+	})
+
+	select {
+	case summary := <-summaries:
+		t.Fatalf("received unexpected summary: %+v", summary)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestPressureReporterConcurrentObserve(t *testing.T) {
+	summaries := make(chan PressureSummary, 1)
+	reporter := newTestPressureReporter(t, 10*time.Millisecond, func(summary PressureSummary) {
+		summaries <- summary
+	})
+
+	const events = 100
+	var wg sync.WaitGroup
+	wg.Add(events)
+	for i := 0; i < events; i++ {
+		go func() {
+			defer wg.Done()
+			reporter.Observe(7)
+		}()
+	}
+	wg.Wait()
+
+	select {
+	case summary := <-summaries:
+		if summary.EvictedEntries != events {
+			t.Fatalf("evicted entries = %d, want %d", summary.EvictedEntries, events)
+		}
+		if summary.EvictedBytes != events*7 {
+			t.Fatalf("evicted bytes = %d, want %d", summary.EvictedBytes, events*7)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for concurrent pressure summary")
+	}
+}
+
+func TestPressureReporterCloseFlushesPendingEvents(t *testing.T) {
+	summaries := make(chan PressureSummary, 1)
+	reporter, err := NewPressureReporter(time.Hour, func(summary PressureSummary) {
+		summaries <- summary
+	})
+	if err != nil {
+		t.Fatalf("NewPressureReporter() error = %v", err)
+	}
+
+	reporter.Observe(99)
+	reporter.Close()
+	reporter.Close()
+
+	select {
+	case summary := <-summaries:
+		if summary.EvictedEntries != 1 || summary.EvictedBytes != 99 {
+			t.Fatalf("summary = %+v, want one event with 99 bytes", summary)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for close flush")
+	}
+}
+
+func TestNewPressureReporterValidatesArguments(t *testing.T) {
+	if reporter, err := NewPressureReporter(0, func(PressureSummary) {}); reporter != nil || err != ErrInvalidInterval {
+		t.Fatalf("zero interval = reporter %v, error %v; want nil, ErrInvalidInterval", reporter, err)
+	}
+	if reporter, err := NewPressureReporter(time.Second, nil); reporter != nil || err != ErrNilReporter {
+		t.Fatalf("nil report = reporter %v, error %v; want nil, ErrNilReporter", reporter, err)
+	}
+}
+
+func newTestPressureReporter(t *testing.T, interval time.Duration, report func(PressureSummary)) *PressureReporter {
+	t.Helper()
+
+	reporter, err := NewPressureReporter(interval, report)
+	if err != nil {
+		t.Fatalf("NewPressureReporter() error = %v", err)
+	}
+	t.Cleanup(reporter.Close)
+	return reporter
+}
