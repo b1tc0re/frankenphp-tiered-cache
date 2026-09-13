@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-$extension = 'franken_tiered';
+$extension = 'franken_cache';
 $expectedVersion = '0.0.0-dev';
 
 if (! extension_loaded($extension)) {
@@ -25,4 +25,4 @@ if ($version !== $expectedVersion) {
     exit(1);
 }
 
-fwrite(STDOUT, "franken_tiered smoke test passed ({$version}).\n");
+fwrite(STDOUT, "franken_cache smoke test passed ({$version}).\n");

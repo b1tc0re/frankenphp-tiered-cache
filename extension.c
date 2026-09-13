@@ -3,12 +3,12 @@
 
 #include "_cgo_export.h"
 
-static void franken_tiered_throw_memory_error(void)
+static void franken_cache_throw_memory_error(void)
 {
-    zend_throw_error(NULL, "franken_tiered MemoryCache operation failed");
+    zend_throw_error(NULL, "franken_cache MemoryCache operation failed");
 }
 
-PHP_FUNCTION(franken_tiered_memory_get)
+PHP_FUNCTION(franken_cache_memory_get)
 {
     zend_string *key;
 
@@ -17,9 +17,9 @@ PHP_FUNCTION(franken_tiered_memory_get)
     ZEND_PARSE_PARAMETERS_END();
 
     int status = 0;
-    zend_string *value = franken_tiered_memory_get_go(key, &status);
+    zend_string *value = franken_cache_memory_get_go(key, &status);
     if (status < 0) {
-        franken_tiered_throw_memory_error();
+        franken_cache_throw_memory_error();
         RETURN_THROWS();
     }
     if (status == 0) {
@@ -32,7 +32,7 @@ PHP_FUNCTION(franken_tiered_memory_get)
     RETURN_STR(value);
 }
 
-PHP_FUNCTION(franken_tiered_memory_set)
+PHP_FUNCTION(franken_cache_memory_set)
 {
     zend_string *key;
     zend_string *value;
@@ -49,16 +49,16 @@ PHP_FUNCTION(franken_tiered_memory_set)
         RETURN_THROWS();
     }
 
-    int result = franken_tiered_memory_set_go(key, value, ttl);
+    int result = franken_cache_memory_set_go(key, value, ttl);
     if (result < 0) {
-        franken_tiered_throw_memory_error();
+        franken_cache_throw_memory_error();
         RETURN_THROWS();
     }
 
     RETURN_BOOL(result);
 }
 
-PHP_FUNCTION(franken_tiered_memory_forever)
+PHP_FUNCTION(franken_cache_memory_forever)
 {
     zend_string *key;
     zend_string *value;
@@ -68,16 +68,16 @@ PHP_FUNCTION(franken_tiered_memory_forever)
         Z_PARAM_STR(value)
     ZEND_PARSE_PARAMETERS_END();
 
-    int result = franken_tiered_memory_forever_go(key, value);
+    int result = franken_cache_memory_forever_go(key, value);
     if (result < 0) {
-        franken_tiered_throw_memory_error();
+        franken_cache_throw_memory_error();
         RETURN_THROWS();
     }
 
     RETURN_BOOL(result);
 }
 
-PHP_FUNCTION(franken_tiered_memory_forget)
+PHP_FUNCTION(franken_cache_memory_forget)
 {
     zend_string *key;
 
@@ -85,16 +85,16 @@ PHP_FUNCTION(franken_tiered_memory_forget)
         Z_PARAM_STR(key)
     ZEND_PARSE_PARAMETERS_END();
 
-    int result = franken_tiered_memory_forget_go(key);
+    int result = franken_cache_memory_forget_go(key);
     if (result < 0) {
-        franken_tiered_throw_memory_error();
+        franken_cache_throw_memory_error();
         RETURN_THROWS();
     }
 
     RETURN_BOOL(result);
 }
 
-PHP_FUNCTION(franken_tiered_memory_touch)
+PHP_FUNCTION(franken_cache_memory_touch)
 {
     zend_string *key;
     zend_long ttl;
@@ -109,32 +109,32 @@ PHP_FUNCTION(franken_tiered_memory_touch)
         RETURN_THROWS();
     }
 
-    int result = franken_tiered_memory_touch_go(key, ttl);
+    int result = franken_cache_memory_touch_go(key, ttl);
     if (result < 0) {
-        franken_tiered_throw_memory_error();
+        franken_cache_throw_memory_error();
         RETURN_THROWS();
     }
 
     RETURN_BOOL(result);
 }
 
-PHP_FUNCTION(franken_tiered_memory_flush)
+PHP_FUNCTION(franken_cache_memory_flush)
 {
     ZEND_PARSE_PARAMETERS_NONE();
 
-    int result = franken_tiered_memory_flush_go();
+    int result = franken_cache_memory_flush_go();
     if (result < 0) {
-        franken_tiered_throw_memory_error();
+        franken_cache_throw_memory_error();
         RETURN_THROWS();
     }
 
     RETURN_BOOL(result);
 }
 
-zend_module_entry franken_tiered_module_entry = {
+zend_module_entry franken_cache_module_entry = {
     STANDARD_MODULE_HEADER,
-    "franken_tiered",
-    franken_tiered_functions,
+    "franken_cache",
+    franken_cache_functions,
     NULL,
     NULL,
     NULL,

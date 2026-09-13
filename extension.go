@@ -1,4 +1,4 @@
-package frankentiered
+package frankencache
 
 /*
 #include "extension.h"
@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/dunglas/frankenphp"
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
@@ -19,18 +20,24 @@ import (
 
 var phpMemoryCache cachecontract.Cache
 
+type phpMemoryObserver struct{}
+
+func (phpMemoryObserver) OnEviction(memory.EvictionEvent) {
+	caddy.Log().Named("franken_cache").Warn("MemoryCache evicted a live entry due to memory pressure")
+}
+
 func init() {
-	cache, err := memory.New(memory.Config{})
+	cache, err := memory.New(memory.Config{Observer: phpMemoryObserver{}})
 	if err != nil {
-		panic(fmt.Sprintf("franken_tiered: initialize MemoryCache: %v", err))
+		panic(fmt.Sprintf("franken_cache: initialize MemoryCache: %v", err))
 	}
 	phpMemoryCache = cache
 
-	frankenphp.RegisterExtension(unsafe.Pointer(&C.franken_tiered_module_entry))
+	frankenphp.RegisterExtension(unsafe.Pointer(&C.franken_cache_module_entry))
 }
 
-//export franken_tiered_memory_get_go
-func franken_tiered_memory_get_go(key *C.zend_string, status *C.int) *C.zend_string {
+//export franken_cache_memory_get_go
+func franken_cache_memory_get_go(key *C.zend_string, status *C.int) *C.zend_string {
 	value, err := phpMemoryCache.Get(frankenphp.GoString(unsafe.Pointer(key)))
 	if err != nil {
 		*status = -1
@@ -50,8 +57,8 @@ func franken_tiered_memory_get_go(key *C.zend_string, status *C.int) *C.zend_str
 	return (*C.zend_string)(frankenphp.PHPString(valueString, false))
 }
 
-//export franken_tiered_memory_set_go
-func franken_tiered_memory_set_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
+//export franken_cache_memory_set_go
+func franken_cache_memory_set_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)
 	if !ok {
 		return -1
@@ -65,8 +72,8 @@ func franken_tiered_memory_set_go(key, value *C.zend_string, ttlSeconds C.zend_l
 	return phpBoolResult(stored, err)
 }
 
-//export franken_tiered_memory_forever_go
-func franken_tiered_memory_forever_go(key, value *C.zend_string) C.int {
+//export franken_cache_memory_forever_go
+func franken_cache_memory_forever_go(key, value *C.zend_string) C.int {
 	stored, err := phpMemoryCache.Forever(
 		frankenphp.GoString(unsafe.Pointer(key)),
 		phpBytes(value),
@@ -74,14 +81,14 @@ func franken_tiered_memory_forever_go(key, value *C.zend_string) C.int {
 	return phpBoolResult(stored, err)
 }
 
-//export franken_tiered_memory_forget_go
-func franken_tiered_memory_forget_go(key *C.zend_string) C.int {
+//export franken_cache_memory_forget_go
+func franken_cache_memory_forget_go(key *C.zend_string) C.int {
 	removed, err := phpMemoryCache.Forget(frankenphp.GoString(unsafe.Pointer(key)))
 	return phpBoolResult(removed, err)
 }
 
-//export franken_tiered_memory_touch_go
-func franken_tiered_memory_touch_go(key *C.zend_string, ttlSeconds C.zend_long) C.int {
+//export franken_cache_memory_touch_go
+func franken_cache_memory_touch_go(key *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)
 	if !ok {
 		return -1
@@ -91,8 +98,8 @@ func franken_tiered_memory_touch_go(key *C.zend_string, ttlSeconds C.zend_long) 
 	return phpBoolResult(touched, err)
 }
 
-//export franken_tiered_memory_flush_go
-func franken_tiered_memory_flush_go() C.int {
+//export franken_cache_memory_flush_go
+func franken_cache_memory_flush_go() C.int {
 	flushed, err := phpMemoryCache.Flush()
 	return phpBoolResult(flushed, err)
 }
