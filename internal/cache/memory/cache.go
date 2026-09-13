@@ -86,29 +86,34 @@ func newMemoryCache(config Config, shardCount, lruSamples int) (*MemoryCache, er
 	return cache, nil
 }
 
-// Get returns the cached value without copying it. A nil value with a nil error
-// means cache miss. Returned bytes are read-only and must not be modified.
-func (c *MemoryCache) Get(key string) ([]byte, error) {
+// Get returns the cached value and its remaining TTL without copying it. A nil
+// value with a nil error means cache miss. A zero TTL means no expiration.
+// Returned bytes are read-only and must not be modified.
+func (c *MemoryCache) Get(key string) ([]byte, time.Duration, error) {
 	shard := c.shardFor(key)
 
 	shard.mu.RLock()
 	entry, ok := shard.entries[key]
 	if !ok {
 		shard.mu.RUnlock()
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	now := c.now()
 	if isExpired(entry.expiresAt, now) {
 		shard.mu.RUnlock()
 		c.deleteExpired(shard, key, entry, now)
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	c.recordAccess(entry)
 	value := entry.value
+	ttl := time.Duration(0)
+	if !entry.expiresAt.IsZero() {
+		ttl = entry.expiresAt.Sub(now)
+	}
 	shard.mu.RUnlock()
-	return value, nil
+	return value, ttl, nil
 }
 
 // Set stores value with expiration without copying it. The caller transfers

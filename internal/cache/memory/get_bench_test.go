@@ -73,7 +73,7 @@ func benchmarkMemoryCacheGet(b *testing.B, workers int, distinctKeys bool) {
 
 			key := keys[worker]
 			for i := 0; i < iterations; i++ {
-				value, err := cache.Get(key)
+				value, _, err := cache.Get(key)
 				if err != nil || value == nil {
 					b.Errorf("Get(%q) = %q, %v; want hit", key, value, err)
 					return

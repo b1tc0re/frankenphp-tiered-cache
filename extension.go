@@ -56,7 +56,7 @@ func init() {
 
 //export franken_cache_memory_get_go
 func franken_cache_memory_get_go(key *C.zend_string, status *C.int) *C.zend_string {
-	value, err := phpMemoryCache.Get(frankenphp.GoString(unsafe.Pointer(key)))
+	value, _, err := phpMemoryCache.Get(frankenphp.GoString(unsafe.Pointer(key)))
 	if err != nil {
 		*status = -1
 		return nil

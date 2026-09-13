@@ -41,7 +41,7 @@ func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
 
 	clock := cache.lruClock.Add(1)
 	now = time.Unix(1, 0)
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil || got == nil {
 		t.Fatalf("Get() = %q, %v; want hit", got, err)
 	}
@@ -52,7 +52,7 @@ func TestMemoryCacheLRUClockTracksSuccessfulAccesses(t *testing.T) {
 		t.Fatalf("Get() changed lru clock to %d, want %d", got, clock)
 	}
 
-	if _, err := cache.Get("missing"); err != nil {
+	if _, _, err := cache.Get("missing"); err != nil {
 		t.Fatalf("Get(missing) error = %v", err)
 	}
 	if got := cache.lruClock.Load(); got != clock {
@@ -103,7 +103,7 @@ func TestMemoryCacheConcurrentGetsUseCurrentLRUClock(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				got, err := cache.Get("key")
+				got, _, err := cache.Get("key")
 				if err != nil || got == nil {
 					t.Errorf("Get() = %q, %v; want hit", got, err)
 					return

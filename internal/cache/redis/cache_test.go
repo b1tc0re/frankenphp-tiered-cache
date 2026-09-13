@@ -28,7 +28,7 @@ func TestRedisCacheSetGetAndForever(t *testing.T) {
 		"temporary": "value",
 		"permanent": "forever",
 	} {
-		got, err := cache.Get(key)
+		got, _, err := cache.Get(key)
 		if err != nil {
 			t.Fatalf("Get(%q) error = %v", key, err)
 		}
@@ -37,7 +37,14 @@ func TestRedisCacheSetGetAndForever(t *testing.T) {
 		}
 	}
 
-	got, err := cache.Get("missing")
+	if _, ttl, err := cache.Get("temporary"); err != nil || ttl != time.Minute {
+		t.Fatalf("Get(temporary) TTL = %v, %v; want %v, nil", ttl, err, time.Minute)
+	}
+	if _, ttl, err := cache.Get("permanent"); err != nil || ttl != 0 {
+		t.Fatalf("Get(permanent) TTL = %v, %v; want 0, nil", ttl, err)
+	}
+
+	got, _, err := cache.Get("missing")
 	if err != nil {
 		t.Fatalf("Get(missing) error = %v", err)
 	}
@@ -154,8 +161,60 @@ func TestRedisCachePropagatesClientErrors(t *testing.T) {
 	client.getErr = wantErr
 	cache := newWithClient(client, "test:")
 
-	if _, err := cache.Get("key"); !errors.Is(err, wantErr) {
+	if _, _, err := cache.Get("key"); !errors.Is(err, wantErr) {
 		t.Fatalf("Get() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestParseGetWithTTLResult(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  interface{}
+		want    []byte
+		wantTTL time.Duration
+		wantErr bool
+	}{
+		{
+			name:    "expiring value",
+			result:  []interface{}{"value", int64(1500)},
+			want:    []byte("value"),
+			wantTTL: 1500 * time.Millisecond,
+		},
+		{
+			name:   "forever value",
+			result: []interface{}{"value", int64(-1)},
+			want:   []byte("value"),
+		},
+		{
+			name:    "imminently expiring value",
+			result:  []interface{}{"value", int64(0)},
+			want:    []byte("value"),
+			wantTTL: time.Nanosecond,
+		},
+		{
+			name:   "missing value",
+			result: []interface{}{nil, int64(-2)},
+		},
+		{
+			name:    "invalid result",
+			result:  "value",
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, gotTTL, err := parseGetWithTTLResult(test.result)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, wantErr %t", err, test.wantErr)
+			}
+			if string(got) != string(test.want) {
+				t.Errorf("value = %q, want %q", got, test.want)
+			}
+			if gotTTL != test.wantTTL {
+				t.Errorf("TTL = %v, want %v", gotTTL, test.wantTTL)
+			}
+		})
 	}
 }
 
@@ -195,6 +254,7 @@ type fakeClient struct {
 	mu sync.Mutex
 
 	values map[string][]byte
+	ttls   map[string]time.Duration
 
 	getErr    error
 	setErr    error
@@ -207,25 +267,28 @@ type fakeClient struct {
 }
 
 func newFakeClient() *fakeClient {
-	return &fakeClient{values: make(map[string][]byte)}
+	return &fakeClient{
+		values: make(map[string][]byte),
+		ttls:   make(map[string]time.Duration),
+	}
 }
 
-func (f *fakeClient) Get(_ context.Context, key string) ([]byte, error) {
+func (f *fakeClient) Get(_ context.Context, key string) ([]byte, time.Duration, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.getErr != nil {
-		return nil, f.getErr
+		return nil, 0, f.getErr
 	}
 	value, ok := f.values[key]
 	if !ok {
-		return nil, goredis.Nil
+		return nil, 0, goredis.Nil
 	}
 
-	return append([]byte(nil), value...), nil
+	return append([]byte(nil), value...), f.ttls[key], nil
 }
 
-func (f *fakeClient) Set(_ context.Context, key string, value []byte, _ time.Duration) error {
+func (f *fakeClient) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -233,6 +296,7 @@ func (f *fakeClient) Set(_ context.Context, key string, value []byte, _ time.Dur
 		return f.setErr
 	}
 	f.values[key] = append([]byte(nil), value...)
+	f.ttls[key] = ttl
 	return nil
 }
 
@@ -248,13 +312,14 @@ func (f *fakeClient) Del(_ context.Context, keys ...string) (int64, error) {
 	for _, key := range keys {
 		if _, ok := f.values[key]; ok {
 			delete(f.values, key)
+			delete(f.ttls, key)
 			deleted++
 		}
 	}
 	return deleted, nil
 }
 
-func (f *fakeClient) Expire(_ context.Context, key string, _ time.Duration) (bool, error) {
+func (f *fakeClient) Expire(_ context.Context, key string, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -262,6 +327,9 @@ func (f *fakeClient) Expire(_ context.Context, key string, _ time.Duration) (boo
 		return false, f.expireErr
 	}
 	_, ok := f.values[key]
+	if ok {
+		f.ttls[key] = ttl
+	}
 	return ok, nil
 }
 

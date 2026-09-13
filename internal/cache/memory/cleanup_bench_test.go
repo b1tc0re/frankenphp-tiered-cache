@@ -129,7 +129,7 @@ func benchmarkMemoryCacheCleanupContention(b *testing.B, set bool) {
 				}
 			} else {
 				for i := 0; i < b.N; i++ {
-					got, err := cache.Get(hotKey)
+					got, _, err := cache.Get(hotKey)
 					if err != nil || got == nil {
 						b.Fatalf("Get(%q) = %q, %v; want hit", hotKey, got, err)
 					}

@@ -32,7 +32,7 @@ func TestMemoryCacheStaleEvictionCandidateDoesNotRemoveReplacement(t *testing.T)
 		t.Fatalf("current bytes = %d after stale eviction attempt, want %d", got, before)
 	}
 
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -76,7 +76,7 @@ func TestMemoryCacheEvictionCandidateReportsActualDeletion(t *testing.T) {
 		t.Fatalf("current bytes = %d after eviction, want %d", got, before-entry.cost)
 	}
 
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}

@@ -14,7 +14,7 @@ import (
 func TestMemoryCacheGetMissReturnsNil(t *testing.T) {
 	cache := newTestMemoryCache(t, Config{})
 
-	got, err := cache.Get("missing")
+	got, _, err := cache.Get("missing")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -35,12 +35,15 @@ func TestMemoryCacheSetGetZeroCopy(t *testing.T) {
 		t.Fatal("Set() = false, want true")
 	}
 
-	got, err := cache.Get("key")
+	got, ttl, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 	if !bytes.Equal(got, value) {
 		t.Fatalf("Get() = %q, want %q", got, value)
+	}
+	if ttl <= 0 || ttl > time.Minute {
+		t.Fatalf("Get() TTL = %v, want between 0 and %v", ttl, time.Minute)
 	}
 	if len(value) > 0 && &got[0] != &value[0] {
 		t.Fatal("Get() returned a copied payload; want zero-copy storage")
@@ -56,7 +59,7 @@ func TestMemoryCacheAllowsEmptyNonNilValue(t *testing.T) {
 		t.Fatalf("Set() = %v, %v; want true, nil", stored, err)
 	}
 
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -76,7 +79,7 @@ func TestMemoryCacheExpiration(t *testing.T) {
 	mustSet(t, cache, "key", []byte("value"), time.Minute)
 	now = now.Add(time.Minute)
 
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -96,12 +99,15 @@ func TestMemoryCacheForever(t *testing.T) {
 	mustForever(t, cache, "key", []byte("value"))
 	now = now.Add(100 * 365 * 24 * time.Hour)
 
-	got, err := cache.Get("key")
+	got, ttl, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 	if string(got) != "value" {
 		t.Fatalf("Get() = %q, want value", got)
+	}
+	if ttl != 0 {
+		t.Fatalf("Get() TTL = %v, want 0 for Forever value", ttl)
 	}
 }
 
@@ -161,13 +167,13 @@ func TestMemoryCacheTouchReturnsStatus(t *testing.T) {
 	}
 
 	now = now.Add(90 * time.Second)
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil || got == nil {
 		t.Fatalf("Get() after Touch() = %q, %v; want hit", got, err)
 	}
 
 	now = now.Add(31 * time.Second)
-	got, err = cache.Get("key")
+	got, _, err = cache.Get("key")
 	if err != nil || got != nil {
 		t.Fatalf("Get() after touched TTL = %q, %v; want miss", got, err)
 	}
@@ -201,7 +207,7 @@ func TestMemoryCacheFlush(t *testing.T) {
 	}
 
 	for _, key := range []string{"a", "b"} {
-		got, err := cache.Get(key)
+		got, _, err := cache.Get(key)
 		if err != nil || got != nil {
 			t.Fatalf("Get(%q) = %q, %v; want nil, nil", key, got, err)
 		}
@@ -295,7 +301,7 @@ func TestMemoryCacheEvictsToStayWithinBudget(t *testing.T) {
 		}
 	}
 
-	got, err := cache.Get("key-7")
+	got, _, err := cache.Get("key-7")
 	if err != nil || got == nil {
 		t.Fatalf("Get(key-7) = %q, %v; want hit", got, err)
 	}
@@ -316,13 +322,13 @@ func TestMemoryCachePurgesExpiredBeforeLiveEntries(t *testing.T) {
 	now = now.Add(2 * time.Second)
 	mustForever(t, cache, "new", make([]byte, 200))
 
-	if got, _ := cache.Get("expired"); got != nil {
+	if got, _, _ := cache.Get("expired"); got != nil {
 		t.Fatal("expired key survived pressure cleanup")
 	}
-	if got, _ := cache.Get("live"); got == nil {
+	if got, _, _ := cache.Get("live"); got == nil {
 		t.Fatal("live key was evicted while expired space was available")
 	}
-	if got, _ := cache.Get("new"); got == nil {
+	if got, _, _ := cache.Get("new"); got == nil {
 		t.Fatal("new key missing")
 	}
 }
@@ -369,7 +375,7 @@ func TestMemoryCacheConcurrentAccess(t *testing.T) {
 					t.Errorf("Set() = %v, %v", stored, err)
 					return
 				}
-				if _, err := cache.Get(key); err != nil {
+				if _, _, err := cache.Get(key); err != nil {
 					t.Errorf("Get() error = %v", err)
 					return
 				}

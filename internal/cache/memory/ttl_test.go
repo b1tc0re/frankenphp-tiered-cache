@@ -12,7 +12,7 @@ func TestMemoryCacheGetMissDoesNotReadClock(t *testing.T) {
 		return time.Time{}
 	}
 
-	value, err := cache.Get("missing")
+	value, _, err := cache.Get("missing")
 	if err != nil || value != nil {
 		t.Fatalf("Get(missing) = %q, %v; want nil, nil", value, err)
 	}
@@ -52,7 +52,7 @@ func TestMemoryCacheForeverReplacesExpiringEntry(t *testing.T) {
 	mustForever(t, cache, "key", []byte("new"))
 
 	now = now.Add(24 * time.Hour)
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -70,7 +70,7 @@ func TestMemoryCacheSetReplacesForeverEntryWithExpiration(t *testing.T) {
 	mustSet(t, cache, "key", []byte("new"), time.Minute)
 
 	now = now.Add(time.Minute)
-	got, err := cache.Get("key")
+	got, _, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}

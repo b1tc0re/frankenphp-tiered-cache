@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,7 @@ import (
 )
 
 type client interface {
-	Get(ctx context.Context, key string) ([]byte, error)
+	Get(ctx context.Context, key string) ([]byte, time.Duration, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	Del(ctx context.Context, keys ...string) (int64, error)
 	Expire(ctx context.Context, key string, ttl time.Duration) (bool, error)
@@ -24,8 +25,21 @@ type redisClient struct {
 	client *goredis.Client
 }
 
-func (c redisClient) Get(ctx context.Context, key string) ([]byte, error) {
-	return c.client.Get(ctx, key).Bytes()
+var getWithTTLScript = goredis.NewScript(
+	"local value = redis.call(\"GET\", KEYS[1])\n" +
+		"if not value then\n" +
+		"\treturn {false, -2}\n" +
+		"end\n" +
+		"return {value, redis.call(\"PTTL\", KEYS[1])}",
+)
+
+func (c redisClient) Get(ctx context.Context, key string) ([]byte, time.Duration, error) {
+	result, err := getWithTTLScript.Run(ctx, c.client, []string{key}).Result()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return parseGetWithTTLResult(result)
 }
 
 func (c redisClient) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
@@ -87,13 +101,13 @@ func newWithClient(c client, prefix string) *RedisCache {
 	return &RedisCache{client: c, prefix: prefix}
 }
 
-func (c *RedisCache) Get(key string) ([]byte, error) {
-	value, err := c.client.Get(context.Background(), c.prefixedKey(key))
+func (c *RedisCache) Get(key string) ([]byte, time.Duration, error) {
+	value, ttl, err := c.client.Get(context.Background(), c.prefixedKey(key))
 	if errors.Is(err, goredis.Nil) {
-		return nil, nil
+		return nil, 0, nil
 	}
 
-	return value, err
+	return value, ttl, err
 }
 
 func (c *RedisCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {
@@ -180,4 +194,56 @@ func redisScanPattern(prefix string) string {
 	pattern.WriteByte('*')
 
 	return pattern.String()
+}
+
+func parseGetWithTTLResult(result interface{}) ([]byte, time.Duration, error) {
+	parts, ok := result.([]interface{})
+	if !ok || len(parts) != 2 {
+		return nil, 0, fmt.Errorf("redis: unexpected GET result type %T", result)
+	}
+
+	value, err := redisResultBytes(parts[0])
+	if err != nil {
+		return nil, 0, err
+	}
+	if value == nil {
+		return nil, 0, nil
+	}
+
+	ttlMillis, ok := parts[1].(int64)
+	if !ok {
+		return nil, 0, fmt.Errorf("redis: unexpected PTTL result type %T", parts[1])
+	}
+	if ttlMillis == -1 {
+		return value, 0, nil
+	}
+	if ttlMillis == -2 {
+		return nil, 0, nil
+	}
+	if ttlMillis < 0 {
+		return nil, 0, fmt.Errorf("redis: unexpected PTTL value %d", ttlMillis)
+	}
+	if ttlMillis == 0 {
+		return value, time.Nanosecond, nil
+	}
+
+	return value, time.Duration(ttlMillis) * time.Millisecond, nil
+}
+
+func redisResultBytes(result interface{}) ([]byte, error) {
+	switch value := result.(type) {
+	case nil:
+		return nil, nil
+	case bool:
+		if !value {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("redis: unexpected boolean GET result")
+	case string:
+		return []byte(value), nil
+	case []byte:
+		return append([]byte(nil), value...), nil
+	default:
+		return nil, fmt.Errorf("redis: unexpected value result type %T", result)
+	}
 }
