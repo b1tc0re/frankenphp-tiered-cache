@@ -413,10 +413,10 @@ func (c *TieredCache) recoverDirtyKeys() bool {
 	defer c.dirtyMu.Unlock()
 
 	for key := range c.dirtyKeys {
-		if err := c.publishKeyInvalidation(key); err != nil {
+		if _, err := c.l2.Forget(key); err != nil {
 			return false
 		}
-		if _, err := c.l2.Forget(key); err != nil {
+		if err := c.publishKeyInvalidation(key); err != nil {
 			return false
 		}
 		delete(c.dirtyKeys, key)

@@ -65,6 +65,34 @@ func TestTieredCacheInvalidationOriginsAreUnique(t *testing.T) {
 	}
 }
 
+func TestTieredCacheRecoveryDeletesL2BeforePublishingInvalidation(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.values["key"] = []byte("stale")
+	l2.ttls["key"] = time.Minute
+	cache := newTestTieredCacheWithInvalidation(t, l1, l2, bus)
+	waitForInvalidationCondition(t, func() bool {
+		return cache.invalidationReady.Load()
+	})
+
+	cache.markDirty("key")
+	var valueAtPublish []byte
+	bus.publishHook = func(cacheinvalidation.Event) {
+		valueAtPublish, _, _ = l2.Get("key")
+	}
+
+	if !cache.recoverDirtyKeys() {
+		t.Fatal("recoverDirtyKeys() = false, want true")
+	}
+	if valueAtPublish != nil {
+		t.Fatalf("L2 value at invalidation publish = %q, want nil", valueAtPublish)
+	}
+	if value, _, err := l2.Get("key"); err != nil || value != nil {
+		t.Fatalf("L2 value after recovery = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
 func TestTieredCachePublishFailureIsRecoveredAndInvalidatesPeers(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	l1A := newFakeCache()
@@ -216,6 +244,7 @@ type fakeInvalidationBus struct {
 	subscribers  map[*fakeInvalidationSubscription]struct{}
 	publishErr   error
 	subscribeErr error
+	publishHook  func(cacheinvalidation.Event)
 	closed       bool
 }
 
@@ -244,7 +273,11 @@ func (b *fakeInvalidationBus) Publish(ctx context.Context, event cacheinvalidati
 	for subscriber := range b.subscribers {
 		subscribers = append(subscribers, subscriber)
 	}
+	publishHook := b.publishHook
 	b.mu.Unlock()
+	if publishHook != nil {
+		publishHook(event)
+	}
 
 	for _, subscriber := range subscribers {
 		select {
