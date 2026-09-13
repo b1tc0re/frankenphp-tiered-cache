@@ -2,6 +2,8 @@ package tiered
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -21,6 +23,17 @@ type writeOperation struct {
 }
 
 const recoveryProbeKey = "\x00frankenphp-tiered-cache/recovery-probe"
+
+const invalidationOriginSize = 16
+
+func newInvalidationOrigin() (string, error) {
+	origin := make([]byte, invalidationOriginSize)
+	if _, err := cryptorand.Read(origin); err != nil {
+		return "", fmt.Errorf("tiered cache: generate invalidation origin: %w", err)
+	}
+
+	return hex.EncodeToString(origin), nil
+}
 
 type healthState uint32
 
@@ -215,6 +228,14 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		return nil, err
 	}
 
+	var invalidationOrigin string
+	if bus != nil {
+		invalidationOrigin, err = newInvalidationOrigin()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	cache := &TieredCache{
 		l1:                    l1,
 		l2:                    l2,
@@ -230,9 +251,9 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		recoveryDone:          make(chan struct{}),
 		dirtyKeys:             make(map[string]struct{}),
 		invalidationBus:       bus,
+		invalidationOrigin:    invalidationOrigin,
 		invalidationDone:      make(chan struct{}),
 	}
-	cache.invalidationOrigin = fmt.Sprintf("%p", cache)
 	if bus == nil {
 		cache.invalidationReady.Store(true)
 		close(cache.invalidationDone)

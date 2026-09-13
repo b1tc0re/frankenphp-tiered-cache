@@ -49,6 +49,22 @@ func TestTieredCacheCrossPodInvalidatesLocalL1(t *testing.T) {
 	}
 }
 
+func TestTieredCacheInvalidationOriginsAreUnique(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	cacheA := newTestTieredCacheWithInvalidation(t, newFakeCache(), newFakeCache(), bus)
+	cacheB := newTestTieredCacheWithInvalidation(t, newFakeCache(), newFakeCache(), bus)
+	waitForInvalidationCondition(t, func() bool {
+		return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load()
+	})
+
+	if cacheA.invalidationOrigin == "" || cacheB.invalidationOrigin == "" {
+		t.Fatal("invalidation origin must be generated for every cache")
+	}
+	if cacheA.invalidationOrigin == cacheB.invalidationOrigin {
+		t.Fatalf("invalidation origins are equal: %q", cacheA.invalidationOrigin)
+	}
+}
+
 func TestTieredCachePublishFailureIsRecoveredAndInvalidatesPeers(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	l1A := newFakeCache()
