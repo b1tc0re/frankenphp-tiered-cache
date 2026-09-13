@@ -11,10 +11,11 @@ import (
 )
 
 type writeOperation struct {
-	key     string
-	value   []byte
-	ttl     time.Duration
-	forever bool
+	key       string
+	value     []byte
+	ttl       time.Duration
+	expiresAt time.Time
+	forever   bool
 }
 
 type writeQueue struct {
@@ -150,6 +151,7 @@ type TieredCache struct {
 	workerDone            chan struct{}
 	writeQueueWaitTimeout time.Duration
 	onWriteError          func(key string, err error)
+	now                   func() time.Time
 
 	mutationMu      sync.Mutex
 	mutationVersion atomic.Uint64
@@ -181,6 +183,7 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 		workerDone:            make(chan struct{}),
 		writeQueueWaitTimeout: config.WriteQueueWaitTimeout,
 		onWriteError:          config.OnWriteError,
+		now:                   time.Now,
 	}
 	go cache.runWriter()
 
@@ -260,7 +263,12 @@ func (c *TieredCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 		return false, cachecontract.ErrNilValue
 	}
 
-	return c.enqueueWrite(writeOperation{key: key, value: value, ttl: ttl})
+	return c.enqueueWrite(writeOperation{
+		key:       key,
+		value:     value,
+		ttl:       ttl,
+		expiresAt: c.now().Add(ttl),
+	})
 }
 
 func (c *TieredCache) Forever(key string, value []byte) (bool, error) {
@@ -381,7 +389,12 @@ func (c *TieredCache) runWriter() {
 		if operation.forever {
 			_, err = c.l2.Forever(operation.key, operation.value)
 		} else {
-			_, err = c.l2.Set(operation.key, operation.value, operation.ttl)
+			remainingTTL := operation.expiresAt.Sub(c.now())
+			if remainingTTL <= 0 {
+				_, err = c.l2.Forget(operation.key)
+			} else {
+				_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
+			}
 		}
 		c.pending.complete(operation.key, err)
 		c.queue.complete(operation)
