@@ -6,11 +6,11 @@ import (
 )
 
 type recordingObserver struct {
-	events []EvictionEvent
+	summaries []EvictionSummary
 }
 
-func (o *recordingObserver) OnEviction(event EvictionEvent) {
-	o.events = append(o.events, event)
+func (o *recordingObserver) OnEviction(summary EvictionSummary) {
+	o.summaries = append(o.summaries, summary)
 }
 
 type lockCheckingObserver struct {
@@ -19,7 +19,7 @@ type lockCheckingObserver struct {
 	evictionMuAvailable bool
 }
 
-func (o *lockCheckingObserver) OnEviction(EvictionEvent) {
+func (o *lockCheckingObserver) OnEviction(EvictionSummary) {
 	shard := &o.cache.shards[0]
 	if shard.mu.TryLock() {
 		o.shardLockAvailable = true
@@ -35,7 +35,7 @@ type reentrantFlushObserver struct {
 	cache *MemoryCache
 }
 
-func (o *reentrantFlushObserver) OnEviction(EvictionEvent) {
+func (o *reentrantFlushObserver) OnEviction(EvictionSummary) {
 	_, _ = o.cache.Flush()
 }
 
@@ -50,10 +50,37 @@ func TestObserverReportsLivePressureEviction(t *testing.T) {
 	mustObserverForever(t, cache, "a", make([]byte, 60))
 	mustObserverForever(t, cache, "b", make([]byte, 60))
 
-	if len(observer.events) != 1 {
-		t.Fatalf("observer events = %d, want 1", len(observer.events))
+	if len(observer.summaries) != 1 {
+		t.Fatalf("observer summaries = %d, want 1", len(observer.summaries))
 	}
-	if got, want := observer.events[0].Bytes, int64(61); got != want {
+	if got, want := observer.summaries[0].Entries, uint64(1); got != want {
+		t.Fatalf("evicted entries = %d, want %d", got, want)
+	}
+	if got, want := observer.summaries[0].Bytes, int64(61); got != want {
+		t.Fatalf("evicted bytes = %d, want %d", got, want)
+	}
+}
+
+func TestObserverAggregatesLivePressureEvictions(t *testing.T) {
+	observer := &recordingObserver{}
+	cache := newObserverTestCache(t, Config{
+		MaxMemoryBytes:   100,
+		MaxItemSizeBytes: 100,
+		Observer:         observer,
+	}, 1)
+
+	mustObserverForever(t, cache, "a", make([]byte, 30))
+	mustObserverForever(t, cache, "b", make([]byte, 30))
+	mustObserverForever(t, cache, "c", make([]byte, 30))
+	mustObserverForever(t, cache, "d", make([]byte, 89))
+
+	if len(observer.summaries) != 1 {
+		t.Fatalf("observer summaries = %d, want 1", len(observer.summaries))
+	}
+	if got, want := observer.summaries[0].Entries, uint64(3); got != want {
+		t.Fatalf("evicted entries = %d, want %d", got, want)
+	}
+	if got, want := observer.summaries[0].Bytes, int64(93); got != want {
 		t.Fatalf("evicted bytes = %d, want %d", got, want)
 	}
 }
@@ -75,8 +102,8 @@ func TestObserverDoesNotReportExpiredEntryRemoval(t *testing.T) {
 	now = now.Add(2 * time.Second)
 	mustObserverForever(t, cache, "b", make([]byte, 60))
 
-	if len(observer.events) != 0 {
-		t.Fatalf("observer events = %d, want 0", len(observer.events))
+	if len(observer.summaries) != 0 {
+		t.Fatalf("observer summaries = %d, want 0", len(observer.summaries))
 	}
 }
 
@@ -93,8 +120,8 @@ func TestObserverIgnoresExplicitRemovalAndFlush(t *testing.T) {
 		t.Fatalf("Flush() = %v, %v; want true, nil", flushed, err)
 	}
 
-	if len(observer.events) != 0 {
-		t.Fatalf("observer events = %d, want 0", len(observer.events))
+	if len(observer.summaries) != 0 {
+		t.Fatalf("observer summaries = %d, want 0", len(observer.summaries))
 	}
 }
 

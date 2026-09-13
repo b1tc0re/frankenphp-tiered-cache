@@ -27,8 +27,8 @@ type phpMemoryObserver struct {
 	reporter *observability.PressureReporter
 }
 
-func (o *phpMemoryObserver) OnEviction(event memory.EvictionEvent) {
-	o.reporter.Observe(event.Bytes)
+func (o *phpMemoryObserver) OnEviction(summary memory.EvictionSummary) {
+	o.reporter.Observe(summary.Entries, summary.Bytes)
 }
 
 func init() {

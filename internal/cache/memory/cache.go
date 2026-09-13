@@ -246,8 +246,8 @@ func (c *MemoryCache) set(key string, value []byte, ttl time.Duration, forever b
 		}
 		shard.mu.Unlock()
 
-		evicted, events := c.evictFor(delta)
-		c.notifyEvictions(events)
+		evicted, summary := c.evictFor(delta)
+		c.notifyEviction(summary)
 		if !evicted {
 			return false, nil
 		}
@@ -303,12 +303,12 @@ func (c *MemoryCache) tryReserve(bytes int64) bool {
 	}
 }
 
-func (c *MemoryCache) evictFor(required int64) (bool, []EvictionEvent) {
+func (c *MemoryCache) evictFor(required int64) (bool, EvictionSummary) {
 	c.evictionMu.Lock()
 	defer c.evictionMu.Unlock()
 
 	if required <= 0 || c.current.Load()+required <= c.maxMemory {
-		return true, nil
+		return true, EvictionSummary{}
 	}
 
 	now := c.now()
@@ -323,14 +323,15 @@ func (c *MemoryCache) evictFor(required int64) (bool, []EvictionEvent) {
 		target = 0
 	}
 
-	var events []EvictionEvent
+	var summary EvictionSummary
 	failedEvictions := 0
 	for c.current.Load() > target {
 		before := c.current.Load()
 		result := c.evictOneLRU()
 		if result.removed {
 			if result.live && c.observer != nil {
-				events = append(events, EvictionEvent{Bytes: result.bytes})
+				summary.Entries++
+				summary.Bytes += result.bytes
 			}
 			failedEvictions = 0
 			continue
@@ -344,16 +345,14 @@ func (c *MemoryCache) evictFor(required int64) (bool, []EvictionEvent) {
 			break
 		}
 	}
-	return c.current.Load()+required <= c.maxMemory, events
+	return c.current.Load()+required <= c.maxMemory, summary
 }
 
-func (c *MemoryCache) notifyEvictions(events []EvictionEvent) {
-	if c.observer == nil {
+func (c *MemoryCache) notifyEviction(summary EvictionSummary) {
+	if c.observer == nil || summary.Entries == 0 {
 		return
 	}
-	for _, event := range events {
-		c.observer.OnEviction(event)
-	}
+	c.observer.OnEviction(summary)
 }
 
 func (c *MemoryCache) purgeExpired(now time.Time) {

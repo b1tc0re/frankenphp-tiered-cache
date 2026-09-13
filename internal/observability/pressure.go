@@ -55,15 +55,15 @@ func NewPressureReporter(interval time.Duration, report func(PressureSummary)) (
 	return reporter, nil
 }
 
-// Observe records one live-entry eviction. Negative byte counts are ignored
+// Observe records live-entry evictions. Negative byte counts are ignored
 // because they cannot represent a valid eviction size.
-func (r *PressureReporter) Observe(evictedBytes int64) {
-	if evictedBytes < 0 {
+func (r *PressureReporter) Observe(evictedEntries uint64, evictedBytes int64) {
+	if evictedEntries == 0 || evictedBytes < 0 {
 		return
 	}
 
 	r.mu.Lock()
-	r.evictedEntries++
+	r.evictedEntries += evictedEntries
 	r.evictedBytes += evictedBytes
 	r.mu.Unlock()
 }

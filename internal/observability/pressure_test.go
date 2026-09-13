@@ -12,8 +12,8 @@ func TestPressureReporterAggregatesEvents(t *testing.T) {
 		summaries <- summary
 	})
 
-	reporter.Observe(12)
-	reporter.Observe(30)
+	reporter.Observe(1, 12)
+	reporter.Observe(1, 30)
 
 	select {
 	case summary := <-summaries:
@@ -56,7 +56,7 @@ func TestPressureReporterConcurrentObserve(t *testing.T) {
 	for i := 0; i < events; i++ {
 		go func() {
 			defer wg.Done()
-			reporter.Observe(7)
+			reporter.Observe(1, 7)
 		}()
 	}
 	wg.Wait()
@@ -83,7 +83,7 @@ func TestPressureReporterCloseFlushesPendingEvents(t *testing.T) {
 		t.Fatalf("NewPressureReporter() error = %v", err)
 	}
 
-	reporter.Observe(99)
+	reporter.Observe(1, 99)
 	reporter.Close()
 	reporter.Close()
 
