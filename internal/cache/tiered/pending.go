@@ -2,64 +2,44 @@ package tiered
 
 import "sync"
 
-type pendingWriteState struct {
-	count int
-}
-
+// pendingWrites tracks asynchronous L2 writes per key. Get waits on this state
+// before falling back to L2 so it cannot observe an older value while a local
+// write-behind operation is still pending.
 type pendingWrites struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
-	states map[string]*pendingWriteState
+	states map[string]int
 }
 
 func newPendingWrites() *pendingWrites {
-	pending := &pendingWrites{states: make(map[string]*pendingWriteState)}
+	pending := &pendingWrites{states: make(map[string]int)}
 	pending.cond = sync.NewCond(&pending.mu)
 	return pending
 }
 
 func (p *pendingWrites) add(key string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	state := p.states[key]
-	if state == nil {
-		state = &pendingWriteState{}
-		p.states[key] = state
-	}
-	state.count++
+	p.states[key]++
+	p.mu.Unlock()
 }
 
 func (p *pendingWrites) cancel(key string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	state := p.states[key]
-	if state == nil {
-		return
-	}
-	if state.count > 0 {
-		state.count--
-	}
-	if state.count == 0 {
-		delete(p.states, key)
-	}
-	p.cond.Broadcast()
+	p.finish(key)
 }
 
 func (p *pendingWrites) complete(key string) {
+	p.finish(key)
+}
+
+func (p *pendingWrites) finish(key string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	state := p.states[key]
-	if state == nil {
-		return
-	}
-	if state.count > 0 {
-		state.count--
-	}
-	if state.count == 0 {
+	count := p.states[key]
+	if count <= 1 {
 		delete(p.states, key)
+	} else {
+		p.states[key] = count - 1
 	}
 	p.cond.Broadcast()
 }
@@ -68,28 +48,17 @@ func (p *pendingWrites) wait(key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for {
-		state := p.states[key]
-		if state == nil {
-			return nil
-		}
-		if state.count == 0 {
-			delete(p.states, key)
-			return nil
-		}
+	for p.states[key] > 0 {
 		p.cond.Wait()
 	}
+	return nil
 }
 
 func (p *pendingWrites) status(key string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	state := p.states[key]
-	if state == nil {
-		return false, nil
-	}
-	return state.count > 0, nil
+	return p.states[key] > 0, nil
 }
 
 func (p *pendingWrites) clear(key string) {
