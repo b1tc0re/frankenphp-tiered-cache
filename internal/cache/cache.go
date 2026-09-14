@@ -11,6 +11,11 @@ var (
 	ErrItemTooLarge = errors.New("cache: item exceeds maximum size")
 )
 
+// Cache defines the shared semantics used by all cache backends.
+//
+// Implementations may retain values without copying them. Callers must treat a
+// value as read-only after a successful Set or Forever call. Bytes returned by
+// Get are also read-only and must not be modified.
 type Cache interface {
 	// Get returns a cached value and its remaining TTL.
 	//
