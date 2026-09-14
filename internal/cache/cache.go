@@ -31,14 +31,18 @@ type Cache interface {
 }
 
 // FenceToken identifies the version of a key mutation reserved in L2.
-//
-// A token is opaque to the composition layer. A fenced backend must reject a
-// queued write when another instance has advanced the key's fence in the
-// meantime.
+// Tokens are opaque to the composition layer.
 type FenceToken string
 
 // FencedCache extends Cache with atomic L2 fencing operations used by
 // TieredCache when cross-instance invalidation is enabled.
+//
+// ReserveFence installs a new token for the key and makes all older tokens
+// stale. SetWithFence and ForeverWithFence must mutate the value only while the
+// supplied token is still current; a successful mutation consumes that token.
+// ForgetIfFence conditionally removes the value under the same rule and also
+// consumes the matching token. ForgetWithFence and TouchWithFence invalidate
+// any previously reserved write for the key as part of their atomic mutation.
 type FencedCache interface {
 	Cache
 
