@@ -29,7 +29,11 @@ type Config struct {
 	WriteQueueMaxBytes    int64
 	WriteQueueWaitTimeout time.Duration
 	RecoveryInterval      time.Duration
-	OnWriteError          func(key string, err error)
+
+	// OnWriteError runs synchronously in the single L2 writer goroutine after an
+	// asynchronous write fails. The callback must return quickly; blocking it
+	// stalls subsequent write-behind operations.
+	OnWriteError func(key string, err error)
 }
 
 func (c Config) normalized() (Config, error) {
