@@ -3,9 +3,12 @@ package tiered
 import (
 	"errors"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 )
 
 func TestTieredCacheGetChecksL1BeforeL2(t *testing.T) {
@@ -586,6 +589,8 @@ type fakeCache struct {
 	flushErr    error
 	forgetCalls int
 	flushCalls  int
+	fenceTokens map[string]cachecontract.FenceToken
+	fenceSeq    uint64
 
 	setStarted chan struct{}
 	releaseSet chan struct{}
@@ -595,8 +600,9 @@ type fakeCache struct {
 
 func newFakeCache() *fakeCache {
 	return &fakeCache{
-		values: make(map[string][]byte),
-		ttls:   make(map[string]time.Duration),
+		values:      make(map[string][]byte),
+		ttls:        make(map[string]time.Duration),
+		fenceTokens: make(map[string]cachecontract.FenceToken),
 	}
 }
 
@@ -630,6 +636,111 @@ func (f *fakeCache) Set(key string, keyValue []byte, ttl time.Duration) (bool, e
 
 func (f *fakeCache) Forever(key string, keyValue []byte) (bool, error) {
 	return f.set(key, keyValue, 0, true)
+}
+
+func (f *fakeCache) ReserveFence(key string) (cachecontract.FenceToken, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.fenceSeq++
+	token := cachecontract.FenceToken(strconv.FormatUint(f.fenceSeq, 10))
+	f.fenceTokens[key] = token
+	return token, nil
+}
+
+func (f *fakeCache) SetWithFence(key string, keyValue []byte, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
+	return f.setWithFence(key, keyValue, ttl, token, false)
+}
+
+func (f *fakeCache) ForeverWithFence(key string, keyValue []byte, token cachecontract.FenceToken) (bool, error) {
+	return f.setWithFence(key, keyValue, 0, token, true)
+}
+
+func (f *fakeCache) setWithFence(key string, keyValue []byte, ttl time.Duration, token cachecontract.FenceToken, forever bool) (bool, error) {
+	f.mu.Lock()
+	currentToken := f.fenceTokens[key]
+	setErr := f.setErr
+	started := f.setStarted
+	release := f.releaseSet
+	f.mu.Unlock()
+
+	if setErr != nil {
+		return false, setErr
+	}
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if currentToken != token || f.fenceTokens[key] != token {
+		return false, nil
+	}
+	f.values[key] = append([]byte(nil), keyValue...)
+	if forever {
+		f.ttls[key] = 0
+	} else {
+		f.ttls[key] = ttl
+	}
+	return true, nil
+}
+
+func (f *fakeCache) ForgetWithFence(key string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.fenceSeq++
+	f.fenceTokens[key] = cachecontract.FenceToken(strconv.FormatUint(f.fenceSeq, 10))
+	f.forgetCalls++
+	if f.forgetErr != nil {
+		return false, f.forgetErr
+	}
+	if _, ok := f.values[key]; !ok {
+		return false, nil
+	}
+	delete(f.values, key)
+	delete(f.ttls, key)
+	return true, nil
+}
+
+func (f *fakeCache) ForgetIfFence(key string, token cachecontract.FenceToken) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.fenceTokens[key] != token {
+		return false, nil
+	}
+	if f.forgetErr != nil {
+		return false, f.forgetErr
+	}
+	if _, ok := f.values[key]; !ok {
+		return false, nil
+	}
+	delete(f.values, key)
+	delete(f.ttls, key)
+	return true, nil
+}
+
+func (f *fakeCache) TouchWithFence(key string, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.fenceSeq++
+	f.fenceTokens[key] = cachecontract.FenceToken(strconv.FormatUint(f.fenceSeq, 10))
+	if f.touchErr != nil {
+		return false, f.touchErr
+	}
+	if _, ok := f.values[key]; !ok {
+		return false, nil
+	}
+	f.ttls[key] = ttl
+	return true, nil
 }
 
 func (f *fakeCache) setErrors(getErr, setErr error) {
@@ -707,6 +818,7 @@ func (f *fakeCache) Flush() (bool, error) {
 	}
 	f.values = make(map[string][]byte)
 	f.ttls = make(map[string]time.Duration)
+	f.fenceTokens = make(map[string]cachecontract.FenceToken)
 	return true, nil
 }
 

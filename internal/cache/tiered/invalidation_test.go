@@ -81,11 +81,65 @@ func TestTieredCacheRemoteInvalidationCancelsInFlightWrite(t *testing.T) {
 	})
 
 	close(l2.releaseSet)
-	waitForInvalidationCondition(t, func() bool {
-		return l2.forgetCount() >= 2
-	})
+	cacheA.queue.waitEmpty()
 	if value, _, err := l2.Get("key"); err != nil || value != nil {
 		t.Fatalf("stale L2 value after invalidated write = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
+func TestTieredCacheRemoteInvalidationAfterWriteCompletionDoesNotLeaveStaleL2(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A := newFakeCache()
+	l1B := newFakeCache()
+	l2 := newFakeCache()
+	l2.values["key"] = []byte("old")
+	l2.ttls["key"] = time.Minute
+	l2.setStarted = make(chan struct{}, 1)
+	l2.releaseSet = make(chan struct{})
+
+	cacheA := newTestTieredCacheWithInvalidation(t, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidation(t, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool {
+		return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load()
+	})
+
+	delayedDeliveryStarted := make(chan struct{}, 1)
+	delayedDeliveryRelease := make(chan struct{})
+	bus.delayOrigin = cacheB.invalidationOrigin
+	bus.delayStarted = delayedDeliveryStarted
+	bus.delayRelease = delayedDeliveryRelease
+
+	if ok, err := cacheA.Set("key", []byte("v1"), time.Minute); err != nil || !ok {
+		t.Fatalf("cache A Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	select {
+	case <-l2.setStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cache A L2 worker did not start write")
+	}
+
+	if _, err := cacheB.Forget("key"); err != nil {
+		t.Fatalf("cache B Forget() error = %v", err)
+	}
+	select {
+	case <-delayedDeliveryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cache B invalidation was not delayed")
+	}
+
+	close(l2.releaseSet)
+	cacheA.queue.waitEmpty()
+	if value, _, err := l2.Get("key"); err != nil || value != nil {
+		t.Fatalf("L2 before delayed invalidation = (%q, %v), want (nil, nil)", value, err)
+	}
+
+	close(delayedDeliveryRelease)
+	waitForInvalidationCondition(t, func() bool {
+		value, _, err := l1A.Get("key")
+		return err == nil && value == nil
+	})
+	if value, _, err := l2.Get("key"); err != nil || value != nil {
+		t.Fatalf("L2 after delayed invalidation = (%q, %v), want (nil, nil)", value, err)
 	}
 }
 
@@ -285,6 +339,9 @@ type fakeInvalidationBus struct {
 	publishErr   error
 	subscribeErr error
 	publishHook  func(cacheinvalidation.Event)
+	delayOrigin  string
+	delayStarted chan<- struct{}
+	delayRelease <-chan struct{}
 	closed       bool
 }
 
@@ -314,12 +371,25 @@ func (b *fakeInvalidationBus) Publish(ctx context.Context, event cacheinvalidati
 		subscribers = append(subscribers, subscriber)
 	}
 	publishHook := b.publishHook
+	delayOrigin := b.delayOrigin
+	delayStarted := b.delayStarted
+	delayRelease := b.delayRelease
 	b.mu.Unlock()
 	if publishHook != nil {
 		publishHook(event)
 	}
 
 	for _, subscriber := range subscribers {
+		if event.Origin == delayOrigin && delayRelease != nil {
+			if delayStarted != nil {
+				select {
+				case delayStarted <- struct{}{}:
+				default:
+				}
+			}
+			go deliverDelayedInvalidation(subscriber, event, delayRelease)
+			continue
+		}
 		select {
 		case subscriber.events <- event:
 		case <-subscriber.done:
@@ -328,6 +398,17 @@ func (b *fakeInvalidationBus) Publish(ctx context.Context, event cacheinvalidati
 		}
 	}
 	return nil
+}
+
+func deliverDelayedInvalidation(subscriber *fakeInvalidationSubscription, event cacheinvalidation.Event, release <-chan struct{}) {
+	select {
+	case <-release:
+		select {
+		case subscriber.events <- event:
+		case <-subscriber.done:
+		}
+	case <-subscriber.done:
+	}
 }
 
 func (b *fakeInvalidationBus) Subscribe(ctx context.Context) (cacheinvalidation.Subscription, error) {

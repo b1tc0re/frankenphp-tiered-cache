@@ -20,6 +20,7 @@ type writeOperation struct {
 	ttl             time.Duration
 	expiresAt       time.Time
 	forever         bool
+	fenceToken      cachecontract.FenceToken
 	keyGeneration   uint64
 	flushGeneration uint64
 }
@@ -175,8 +176,9 @@ func (q *writeQueue) close() {
 // wait for all earlier queued writes before touching either backend. When an
 // L2 key mutation fails, its key remains dirty until recovery removes it.
 type TieredCache struct {
-	l1 cachecontract.Cache
-	l2 cachecontract.Cache
+	l1       cachecontract.Cache
+	l2       cachecontract.Cache
+	fencedL2 cachecontract.FencedCache
 
 	queue                 *writeQueue
 	pending               *pendingWrites
@@ -220,7 +222,9 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 }
 
 // NewWithInvalidation composes L1 and L2 with a cross-instance invalidation
-// bus. Received events are applied to this cache's L1 only.
+// bus. The L2 backend must support fencing so delayed writes cannot recreate a
+// value after another instance has forgotten the key. Received events are
+// applied to this cache's L1 only.
 func NewWithInvalidation(config Config, l1, l2 cachecontract.Cache, bus cacheinvalidation.Bus) (*TieredCache, error) {
 	return newTieredCache(config, l1, l2, bus)
 }
@@ -238,6 +242,15 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		return nil, err
 	}
 
+	var fencedL2 cachecontract.FencedCache
+	if bus != nil {
+		var ok bool
+		fencedL2, ok = l2.(cachecontract.FencedCache)
+		if !ok {
+			return nil, fmt.Errorf("tiered cache: L2 cache must support fencing when invalidation is enabled")
+		}
+	}
+
 	var invalidationOrigin string
 	if bus != nil {
 		invalidationOrigin, err = newInvalidationOrigin()
@@ -249,6 +262,7 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 	cache := &TieredCache{
 		l1:                    l1,
 		l2:                    l2,
+		fencedL2:              fencedL2,
 		queue:                 newWriteQueue(config.WriteQueueCapacity, config.WriteQueueMaxBytes),
 		pending:               newPendingWrites(),
 		workerDone:            make(chan struct{}),
@@ -482,7 +496,13 @@ func (c *TieredCache) recoverDirtyKeys() bool {
 	defer c.dirtyMu.Unlock()
 
 	for key := range c.dirtyKeys {
-		if _, err := c.l2.Forget(key); err != nil {
+		var err error
+		if c.fencedL2 != nil {
+			_, err = c.fencedL2.ForgetWithFence(key)
+		} else {
+			_, err = c.l2.Forget(key)
+		}
+		if err != nil {
 			return false
 		}
 		if err := c.publishKeyInvalidation(key); err != nil {
@@ -775,7 +795,13 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 		return false, err
 	}
 	l1Removed, l1Err := c.l1.Forget(key)
-	l2Removed, l2Err := c.l2.Forget(key)
+	var l2Removed bool
+	var l2Err error
+	if c.fencedL2 != nil {
+		l2Removed, l2Err = c.fencedL2.ForgetWithFence(key)
+	} else {
+		l2Removed, l2Err = c.l2.Forget(key)
+	}
 	var publishErr error
 	if l2Err == nil {
 		publishErr = c.publishKeyInvalidation(key)
@@ -821,7 +847,13 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		return false, err
 	}
 	l1Touched, l1Err := c.l1.Touch(key, ttl)
-	l2Touched, l2Err := c.l2.Touch(key, ttl)
+	var l2Touched bool
+	var l2Err error
+	if c.fencedL2 != nil {
+		l2Touched, l2Err = c.fencedL2.TouchWithFence(key, ttl)
+	} else {
+		l2Touched, l2Err = c.l2.Touch(key, ttl)
+	}
 	var publishErr error
 	if l2Err == nil {
 		publishErr = c.publishKeyInvalidation(key)
@@ -925,13 +957,24 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 		return false, err
 	}
 	c.mutationVersion.Add(1)
+	var err error
 	if int64(len(operation.value)) > c.queue.maxBytes {
 		c.mutationMu.Unlock()
 		return false, ErrWriteQueueValueTooLarge
 	}
+	if c.fencedL2 != nil {
+		operation.fenceToken, err = c.fencedL2.ReserveFence(operation.key)
+		if err != nil {
+			newlyDegraded, flushDone := c.transitionToDegraded(err)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return false, c.unavailableError()
+		}
+	}
 
 	var stored bool
-	var err error
 	if operation.forever {
 		stored, err = c.l1.Forever(operation.key, operation.value)
 	} else {
@@ -976,7 +1019,22 @@ func (c *TieredCache) runWriter() {
 		stale := c.writeOperationStale(operation)
 		var err error
 		if !stale {
-			if operation.forever {
+			if c.fencedL2 != nil {
+				var stored bool
+				if operation.forever {
+					stored, err = c.fencedL2.ForeverWithFence(operation.key, operation.value, operation.fenceToken)
+				} else {
+					remainingTTL := operation.expiresAt.Sub(c.now())
+					if remainingTTL <= 0 {
+						stored, err = c.fencedL2.ForgetIfFence(operation.key, operation.fenceToken)
+					} else {
+						stored, err = c.fencedL2.SetWithFence(operation.key, operation.value, remainingTTL, operation.fenceToken)
+					}
+				}
+				if err == nil && !stored {
+					stale = true
+				}
+			} else if operation.forever {
 				_, err = c.l2.Forever(operation.key, operation.value)
 			} else {
 				remainingTTL := operation.expiresAt.Sub(c.now())
@@ -989,8 +1047,13 @@ func (c *TieredCache) runWriter() {
 		}
 		if err == nil && !stale {
 			if c.writeOperationStale(operation) {
-				_, err = c.l2.Forget(operation.key)
-				if err == nil {
+				removed := true
+				if c.fencedL2 != nil {
+					removed, err = c.fencedL2.ForgetIfFence(operation.key, operation.fenceToken)
+				} else {
+					_, err = c.l2.Forget(operation.key)
+				}
+				if err == nil && removed {
 					// The generation change already invalidated peers, but
 					// publish again after cleanup so a concurrent newer write
 					// cannot remain warm in another pod's L1.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,74 @@ func TestRedisCacheSetGetAndForever(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("Get(missing) = %q, want nil", got)
+	}
+}
+
+func TestRedisCacheFencingRejectsWriteAfterForget(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	token, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence() error = %v", err)
+	}
+	if ok, err := cache.SetWithFence("key", []byte("v1"), time.Minute, token); err != nil || !ok {
+		t.Fatalf("SetWithFence() = (%t, %v), want (true, nil)", ok, err)
+	}
+
+	if _, err := cache.ForgetWithFence("key"); err != nil {
+		t.Fatalf("ForgetWithFence() error = %v", err)
+	}
+	if ok, err := cache.SetWithFence("key", []byte("stale"), time.Minute, token); err != nil || ok {
+		t.Fatalf("stale SetWithFence() = (%t, %v), want (false, nil)", ok, err)
+	}
+	if value, _, err := cache.Get("key"); err != nil || value != nil {
+		t.Fatalf("Get() after fenced forget = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
+func TestRedisCacheFencingAllowsLatestWrite(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	first, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("first ReserveFence() error = %v", err)
+	}
+	second, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("second ReserveFence() error = %v", err)
+	}
+	if first == second {
+		t.Fatal("ReserveFence() returned duplicate tokens")
+	}
+	if ok, err := cache.SetWithFence("key", []byte("stale"), time.Minute, first); err != nil || ok {
+		t.Fatalf("stale SetWithFence() = (%t, %v), want (false, nil)", ok, err)
+	}
+	if ok, err := cache.SetWithFence("key", []byte("latest"), time.Minute, second); err != nil || !ok {
+		t.Fatalf("latest SetWithFence() = (%t, %v), want (true, nil)", ok, err)
+	}
+	if value, _, err := cache.Get("key"); err != nil || string(value) != "latest" {
+		t.Fatalf("Get() = (%q, %v), want (latest, nil)", value, err)
+	}
+}
+
+func TestRedisCacheFlushInvalidatesReservedFences(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	token, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence() error = %v", err)
+	}
+	if ok, err := cache.SetWithFence("key", []byte("value"), time.Minute, token); err != nil || !ok {
+		t.Fatalf("SetWithFence() = (%t, %v), want (true, nil)", ok, err)
+	}
+	if ok, err := cache.Flush(); err != nil || !ok {
+		t.Fatalf("Flush() = (%t, %v), want (true, nil)", ok, err)
+	}
+	if ok, err := cache.SetWithFence("key", []byte("stale"), time.Minute, token); err != nil || ok {
+		t.Fatalf("stale SetWithFence() after Flush = (%t, %v), want (false, nil)", ok, err)
 	}
 }
 
@@ -261,6 +330,7 @@ type fakeClient struct {
 
 	values map[string][]byte
 	ttls   map[string]time.Duration
+	hashes map[string]map[string][]byte
 
 	getErr    error
 	setErr    error
@@ -276,6 +346,7 @@ func newFakeClient() *fakeClient {
 	return &fakeClient{
 		values: make(map[string][]byte),
 		ttls:   make(map[string]time.Duration),
+		hashes: make(map[string]map[string][]byte),
 	}
 }
 
@@ -306,6 +377,136 @@ func (f *fakeClient) Set(_ context.Context, key string, value []byte, ttl time.D
 	return nil
 }
 
+func (f *fakeClient) Eval(_ context.Context, script string, keys []string, args ...interface{}) (interface{}, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if len(args) == 0 {
+		return nil, errors.New("invalid fake EVAL arguments")
+	}
+	valueKey := ""
+	if len(keys) > 0 {
+		valueKey = keys[0]
+	}
+
+	switch script {
+	case reserveFenceScript:
+		if len(keys) != 1 || len(args) != 2 {
+			return nil, errors.New("invalid fake reserve fence arguments")
+		}
+		field, fieldOK := args[0].(string)
+		token, tokenOK := args[1].(string)
+		if !fieldOK || !tokenOK {
+			return nil, errors.New("invalid fake reserve fence values")
+		}
+		if f.hashes[keys[0]] == nil {
+			f.hashes[keys[0]] = make(map[string][]byte)
+		}
+		f.hashes[keys[0]][field] = []byte(token)
+		return int64(1), nil
+
+	case setWithFenceScript:
+		if len(keys) != 2 || len(args) != 4 {
+			return nil, errors.New("invalid fake fenced set arguments")
+		}
+		if f.setErr != nil {
+			return nil, f.setErr
+		}
+		field, fieldOK := args[0].(string)
+		token, tokenOK := args[1].(string)
+		if !fieldOK || !tokenOK || string(f.hashes[keys[1]][field]) != token {
+			return int64(0), nil
+		}
+		value, ok := args[2].([]byte)
+		if !ok {
+			return nil, errors.New("invalid fake value")
+		}
+		ttlText, ok := args[3].(string)
+		if !ok {
+			return nil, errors.New("invalid fake ttl")
+		}
+		ttlMillis, err := strconv.ParseInt(ttlText, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		f.values[valueKey] = append([]byte(nil), value...)
+		f.ttls[valueKey] = time.Duration(ttlMillis) * time.Millisecond
+		if ttlMillis == 0 {
+			f.ttls[valueKey] = 0
+		}
+		return int64(1), nil
+
+	case forgetWithFenceScript:
+		if len(keys) != 2 || len(args) != 1 {
+			return nil, errors.New("invalid fake fenced forget arguments")
+		}
+		if f.delErr != nil {
+			return nil, f.delErr
+		}
+		field, ok := args[0].(string)
+		if !ok {
+			return nil, errors.New("invalid fake fence field")
+		}
+		if f.hashes[keys[1]] != nil {
+			delete(f.hashes[keys[1]], field)
+		}
+		if _, exists := f.values[valueKey]; !exists {
+			return int64(0), nil
+		}
+		delete(f.values, valueKey)
+		delete(f.ttls, valueKey)
+		return int64(1), nil
+
+	case forgetIfFenceScript:
+		if len(keys) != 2 || len(args) != 2 {
+			return nil, errors.New("invalid fake conditional forget arguments")
+		}
+		if f.delErr != nil {
+			return nil, f.delErr
+		}
+		field, fieldOK := args[0].(string)
+		token, tokenOK := args[1].(string)
+		if !fieldOK || !tokenOK || string(f.hashes[keys[1]][field]) != token {
+			return int64(0), nil
+		}
+		delete(f.hashes[keys[1]], field)
+		if _, exists := f.values[valueKey]; !exists {
+			return int64(0), nil
+		}
+		delete(f.values, valueKey)
+		delete(f.ttls, valueKey)
+		return int64(1), nil
+
+	case touchWithFenceScript:
+		if len(keys) != 2 || len(args) != 3 {
+			return nil, errors.New("invalid fake fenced touch arguments")
+		}
+		if f.expireErr != nil {
+			return nil, f.expireErr
+		}
+		field, fieldOK := args[0].(string)
+		token, tokenOK := args[1].(string)
+		if !fieldOK || !tokenOK {
+			return nil, errors.New("invalid fake fenced touch values")
+		}
+		if f.hashes[keys[1]] == nil {
+			f.hashes[keys[1]] = make(map[string][]byte)
+		}
+		f.hashes[keys[1]][field] = []byte(token)
+		if _, exists := f.values[valueKey]; !exists {
+			return int64(0), nil
+		}
+		seconds, ok := args[2].(int64)
+		if !ok {
+			return nil, errors.New("invalid fake touch ttl")
+		}
+		f.ttls[valueKey] = time.Duration(seconds) * time.Second
+		return int64(1), nil
+	default:
+		return nil, errors.New("unknown fake EVAL script")
+	}
+}
+
 func (f *fakeClient) Del(_ context.Context, keys ...string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -319,6 +520,10 @@ func (f *fakeClient) Del(_ context.Context, keys ...string) (int64, error) {
 		if _, ok := f.values[key]; ok {
 			delete(f.values, key)
 			delete(f.ttls, key)
+			deleted++
+		}
+		if _, ok := f.hashes[key]; ok {
+			delete(f.hashes, key)
 			deleted++
 		}
 	}

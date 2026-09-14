@@ -2,8 +2,12 @@ package redis
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +19,7 @@ import (
 type client interface {
 	Get(ctx context.Context, key string) ([]byte, time.Duration, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error)
 	Del(ctx context.Context, keys ...string) (int64, error)
 	Expire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 	Scan(ctx context.Context, cursor uint64, match string, count int64) ([]string, uint64, error)
@@ -44,6 +49,10 @@ func (c redisClient) Get(ctx context.Context, key string) ([]byte, time.Duration
 
 func (c redisClient) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	return c.client.Set(ctx, key, value, ttl).Err()
+}
+
+func (c redisClient) Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error) {
+	return c.client.Eval(ctx, script, keys, args...).Result()
 }
 
 func (c redisClient) Del(ctx context.Context, keys ...string) (int64, error) {
@@ -76,6 +85,47 @@ type RedisCache struct {
 }
 
 var _ cachecontract.Cache = (*RedisCache)(nil)
+var _ cachecontract.FencedCache = (*RedisCache)(nil)
+
+const (
+	fenceMetadataPrefix = "\x00frankenphp-tiered-cache/fence:"
+
+	reserveFenceScript = `
+redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
+return 1
+`
+
+	setWithFenceScript = `
+local current = redis.call("HGET", KEYS[2], ARGV[1])
+if current ~= ARGV[2] then
+    return 0
+end
+if ARGV[4] == "0" then
+    redis.call("SET", KEYS[1], ARGV[3])
+else
+    redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
+end
+return 1
+`
+
+	forgetWithFenceScript = `
+redis.call("HDEL", KEYS[2], ARGV[1])
+return redis.call("DEL", KEYS[1])
+`
+
+	forgetIfFenceScript = `
+if redis.call("HGET", KEYS[2], ARGV[1]) ~= ARGV[2] then
+    return 0
+end
+redis.call("HDEL", KEYS[2], ARGV[1])
+return redis.call("DEL", KEYS[1])
+`
+
+	touchWithFenceScript = `
+redis.call("HSET", KEYS[2], ARGV[1], ARGV[2])
+return redis.call("EXPIRE", KEYS[1], ARGV[3])
+`
+)
 
 func New(config Config) (*RedisCache, error) {
 	config, err := config.normalized()
@@ -122,6 +172,39 @@ func (c *RedisCache) Set(key string, value []byte, ttl time.Duration) (bool, err
 	return err == nil, err
 }
 
+func (c *RedisCache) ReserveFence(key string) (cachecontract.FenceToken, error) {
+	token, err := newFenceToken()
+	if err != nil {
+		return "", err
+	}
+	if _, err := c.client.Eval(
+		context.Background(),
+		reserveFenceScript,
+		[]string{c.fenceHashKey()},
+		c.fenceField(key),
+		string(token),
+	); err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func (c *RedisCache) SetWithFence(key string, value []byte, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+	if value == nil {
+		return false, cachecontract.ErrNilValue
+	}
+
+	ttlMillis := ttl.Milliseconds()
+	if ttlMillis <= 0 {
+		ttlMillis = 1
+	}
+	return c.evalFenceWrite(key, value, token, strconv.FormatInt(ttlMillis, 10))
+}
+
 func (c *RedisCache) Forever(key string, value []byte) (bool, error) {
 	if value == nil {
 		return false, cachecontract.ErrNilValue
@@ -131,8 +214,47 @@ func (c *RedisCache) Forever(key string, value []byte) (bool, error) {
 	return err == nil, err
 }
 
+func (c *RedisCache) ForeverWithFence(key string, value []byte, token cachecontract.FenceToken) (bool, error) {
+	if value == nil {
+		return false, cachecontract.ErrNilValue
+	}
+
+	return c.evalFenceWrite(key, value, token, "0")
+}
+
 func (c *RedisCache) Forget(key string) (bool, error) {
 	deleted, err := c.client.Del(context.Background(), c.prefixedKey(key))
+	return deleted > 0, err
+}
+
+func (c *RedisCache) ForgetWithFence(key string) (bool, error) {
+	result, err := c.client.Eval(
+		context.Background(),
+		forgetWithFenceScript,
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
+	)
+	if err != nil {
+		return false, err
+	}
+
+	deleted, err := redisIntegerResult(result)
+	return deleted > 0, err
+}
+
+func (c *RedisCache) ForgetIfFence(key string, token cachecontract.FenceToken) (bool, error) {
+	result, err := c.client.Eval(
+		context.Background(),
+		forgetIfFenceScript,
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
+		string(token),
+	)
+	if err != nil {
+		return false, err
+	}
+
+	deleted, err := redisIntegerResult(result)
 	return deleted > 0, err
 }
 
@@ -142,6 +264,31 @@ func (c *RedisCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	return c.client.Expire(context.Background(), c.prefixedKey(key), ttl)
+}
+
+func (c *RedisCache) TouchWithFence(key string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+
+	token, err := newFenceToken()
+	if err != nil {
+		return false, err
+	}
+	result, err := c.client.Eval(
+		context.Background(),
+		touchWithFenceScript,
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
+		string(token),
+		int64((ttl+time.Second-1)/time.Second),
+	)
+	if err != nil {
+		return false, err
+	}
+
+	touched, err := redisIntegerResult(result)
+	return touched > 0, err
 }
 
 func (c *RedisCache) Flush() (bool, error) {
@@ -163,6 +310,9 @@ func (c *RedisCache) Flush() (bool, error) {
 
 		cursor = nextCursor
 		if cursor == 0 {
+			if _, err := c.client.Del(ctx, c.fenceHashKey()); err != nil {
+				return false, err
+			}
 			return true, nil
 		}
 	}
@@ -178,6 +328,65 @@ func (c *RedisCache) Close() error {
 
 func (c *RedisCache) prefixedKey(key string) string {
 	return c.prefix + key
+}
+
+func (c *RedisCache) fenceHashKey() string {
+	return fenceMetadataPrefix + hex.EncodeToString([]byte(c.prefix))
+}
+
+func (c *RedisCache) fenceField(key string) string {
+	digest := sha256.Sum256([]byte(c.prefixedKey(key)))
+	return hex.EncodeToString(digest[:])
+}
+
+func (c *RedisCache) evalFenceWrite(key string, value []byte, token cachecontract.FenceToken, ttlMillis string) (bool, error) {
+	result, err := c.client.Eval(
+		context.Background(),
+		setWithFenceScript,
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
+		string(token),
+		value,
+		ttlMillis,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	stored, err := redisIntegerResult(result)
+	return stored > 0, err
+}
+
+func newFenceToken() (cachecontract.FenceToken, error) {
+	tokenBytes := make([]byte, 16)
+	if _, err := cryptorand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("redis: generate fence token: %w", err)
+	}
+
+	return cachecontract.FenceToken(hex.EncodeToString(tokenBytes)), nil
+}
+
+func redisIntegerResult(result interface{}) (int64, error) {
+	switch value := result.(type) {
+	case int64:
+		return value, nil
+	case int:
+		return int64(value), nil
+	case string:
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("redis: invalid integer result %q: %w", value, err)
+		}
+		return parsed, nil
+	case []byte:
+		parsed, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("redis: invalid integer result %q: %w", value, err)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("redis: unexpected integer result type %T", result)
+	}
 }
 
 func redisScanPattern(prefix string) string {
