@@ -103,7 +103,7 @@ func TestRedisCacheFencingAllowsLatestWrite(t *testing.T) {
 	}
 }
 
-func TestRedisCacheFlushInvalidatesReservedFences(t *testing.T) {
+func TestRedisCacheFencingCleansSuccessfulMutationTokens(t *testing.T) {
 	client := newFakeClient()
 	cache := newWithClient(client, "test:")
 
@@ -114,11 +114,43 @@ func TestRedisCacheFlushInvalidatesReservedFences(t *testing.T) {
 	if ok, err := cache.SetWithFence("key", []byte("value"), time.Minute, token); err != nil || !ok {
 		t.Fatalf("SetWithFence() = (%t, %v), want (true, nil)", ok, err)
 	}
+	assertFenceFieldAbsent(t, client, cache, "key")
+
+	if ok, err := cache.TouchWithFence("key", time.Minute); err != nil || !ok {
+		t.Fatalf("TouchWithFence(existing) = (%t, %v), want (true, nil)", ok, err)
+	}
+	assertFenceFieldAbsent(t, client, cache, "key")
+
+	if ok, err := cache.TouchWithFence("missing", time.Minute); err != nil || ok {
+		t.Fatalf("TouchWithFence(missing) = (%t, %v), want (false, nil)", ok, err)
+	}
+	assertFenceFieldAbsent(t, client, cache, "missing")
+}
+
+func TestRedisCacheFlushInvalidatesReservedFences(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	token, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence() error = %v", err)
+	}
 	if ok, err := cache.Flush(); err != nil || !ok {
 		t.Fatalf("Flush() = (%t, %v), want (true, nil)", ok, err)
 	}
 	if ok, err := cache.SetWithFence("key", []byte("stale"), time.Minute, token); err != nil || ok {
 		t.Fatalf("stale SetWithFence() after Flush = (%t, %v), want (false, nil)", ok, err)
+	}
+}
+
+func assertFenceFieldAbsent(t *testing.T, client *fakeClient, cache *RedisCache, key string) {
+	t.Helper()
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	if _, exists := client.hashes[cache.fenceHashKey()][cache.fenceField(key)]; exists {
+		t.Fatalf("fence field for %q remains after mutation", key)
 	}
 }
 
@@ -434,6 +466,7 @@ func (f *fakeClient) Eval(_ context.Context, script string, keys []string, args 
 		if ttlMillis == 0 {
 			f.ttls[valueKey] = 0
 		}
+		delete(f.hashes[keys[1]], field)
 		return int64(1), nil
 
 	case forgetWithFenceScript:
@@ -494,6 +527,7 @@ func (f *fakeClient) Eval(_ context.Context, script string, keys []string, args 
 		}
 		f.hashes[keys[1]][field] = []byte(token)
 		if _, exists := f.values[valueKey]; !exists {
+			delete(f.hashes[keys[1]], field)
 			return int64(0), nil
 		}
 		seconds, ok := args[2].(int64)
@@ -501,6 +535,7 @@ func (f *fakeClient) Eval(_ context.Context, script string, keys []string, args 
 			return nil, errors.New("invalid fake touch ttl")
 		}
 		f.ttls[valueKey] = time.Duration(seconds) * time.Second
+		delete(f.hashes[keys[1]], field)
 		return int64(1), nil
 	default:
 		return nil, errors.New("unknown fake EVAL script")

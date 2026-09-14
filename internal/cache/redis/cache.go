@@ -105,6 +105,7 @@ if ARGV[4] == "0" then
 else
     redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
 end
+redis.call("HDEL", KEYS[2], ARGV[1])
 return 1
 `
 
@@ -123,7 +124,9 @@ return redis.call("DEL", KEYS[1])
 
 	touchWithFenceScript = `
 redis.call("HSET", KEYS[2], ARGV[1], ARGV[2])
-return redis.call("EXPIRE", KEYS[1], ARGV[3])
+local touched = redis.call("EXPIRE", KEYS[1], ARGV[3])
+redis.call("HDEL", KEYS[2], ARGV[1])
+return touched
 `
 )
 
