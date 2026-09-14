@@ -43,7 +43,7 @@ func NewInvalidationBus(config Config) (*InvalidationBus, error) {
 			ReadTimeout:  0,
 			WriteTimeout: config.WriteTimeout,
 		}),
-		channel: invalidationChannel(config.KeyPrefix),
+		channel: invalidationChannelForDB(config.KeyPrefix, config.DB),
 	}, nil
 }
 
@@ -128,4 +128,11 @@ func (s *redisInvalidationSubscription) Close() error {
 
 func invalidationChannel(prefix string) string {
 	return prefix + invalidationChannelSuffix
+}
+
+// Redis Pub/Sub channels are server-wide rather than scoped to a selected DB.
+// Include DB explicitly so caches with the same key prefix in different Redis
+// databases do not invalidate each other's process-local L1 entries.
+func invalidationChannelForDB(prefix string, db int) string {
+	return fmt.Sprintf("%s:db:%d", invalidationChannel(prefix), db)
 }
