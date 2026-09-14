@@ -688,6 +688,7 @@ func (f *fakeCache) setWithFence(key string, keyValue []byte, ttl time.Duration,
 	} else {
 		f.ttls[key] = ttl
 	}
+	delete(f.fenceTokens, key)
 	return true, nil
 }
 
@@ -701,6 +702,7 @@ func (f *fakeCache) ForgetWithFence(key string) (bool, error) {
 	if f.forgetErr != nil {
 		return false, f.forgetErr
 	}
+	delete(f.fenceTokens, key)
 	if _, ok := f.values[key]; !ok {
 		return false, nil
 	}
@@ -719,6 +721,7 @@ func (f *fakeCache) ForgetIfFence(key string, token cachecontract.FenceToken) (b
 	if f.forgetErr != nil {
 		return false, f.forgetErr
 	}
+	delete(f.fenceTokens, key)
 	if _, ok := f.values[key]; !ok {
 		return false, nil
 	}
@@ -727,19 +730,22 @@ func (f *fakeCache) ForgetIfFence(key string, token cachecontract.FenceToken) (b
 	return true, nil
 }
 
-func (f *fakeCache) TouchWithFence(key string, ttl time.Duration) (bool, error) {
+func (f *fakeCache) TouchWithFence(key string, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.fenceSeq++
-	f.fenceTokens[key] = cachecontract.FenceToken(strconv.FormatUint(f.fenceSeq, 10))
 	if f.touchErr != nil {
 		return false, f.touchErr
 	}
+	if f.fenceTokens[key] != token {
+		return false, nil
+	}
 	if _, ok := f.values[key]; !ok {
+		delete(f.fenceTokens, key)
 		return false, nil
 	}
 	f.ttls[key] = ttl
+	delete(f.fenceTokens, key)
 	return true, nil
 }
 

@@ -123,7 +123,10 @@ return redis.call("DEL", KEYS[1])
 `
 
 	touchWithFenceScript = `
-redis.call("HSET", KEYS[2], ARGV[1], ARGV[2])
+local current = redis.call("HGET", KEYS[2], ARGV[1])
+if current ~= ARGV[2] then
+    return 0
+end
 local touched = redis.call("EXPIRE", KEYS[1], ARGV[3])
 redis.call("HDEL", KEYS[2], ARGV[1])
 return touched
@@ -269,15 +272,11 @@ func (c *RedisCache) Touch(key string, ttl time.Duration) (bool, error) {
 	return c.client.Expire(context.Background(), c.prefixedKey(key), ttl)
 }
 
-func (c *RedisCache) TouchWithFence(key string, ttl time.Duration) (bool, error) {
+func (c *RedisCache) TouchWithFence(key string, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
 	if ttl <= 0 {
 		return false, cachecontract.ErrInvalidTTL
 	}
 
-	token, err := newFenceToken()
-	if err != nil {
-		return false, err
-	}
 	result, err := c.client.Eval(
 		context.Background(),
 		touchWithFenceScript,

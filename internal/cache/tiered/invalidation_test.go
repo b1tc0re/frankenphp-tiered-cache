@@ -170,7 +170,11 @@ func TestTieredCacheRecoveryDeletesL2BeforePublishingInvalidation(t *testing.T) 
 		return cache.invalidationReady.Load()
 	})
 
-	cache.markDirty("key")
+	token, err := l2.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence() error = %v", err)
+	}
+	cache.markDirtyWithFence("key", token)
 	var valueAtPublish []byte
 	bus.publishHook = func(cacheinvalidation.Event) {
 		valueAtPublish, _, _ = l2.Get("key")
@@ -184,6 +188,83 @@ func TestTieredCacheRecoveryDeletesL2BeforePublishingInvalidation(t *testing.T) 
 	}
 	if value, _, err := l2.Get("key"); err != nil || value != nil {
 		t.Fatalf("L2 value after recovery = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
+func TestTieredCacheRecoveryDoesNotDeleteNewerL2Value(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	cache := newTestTieredCacheWithInvalidation(t, l1, l2, bus)
+	waitForInvalidationCondition(t, func() bool {
+		return cache.invalidationReady.Load()
+	})
+
+	failedToken, err := l2.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence(failed operation) error = %v", err)
+	}
+	cache.markDirtyWithFence("key", failedToken)
+
+	newerToken, err := l2.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence(newer operation) error = %v", err)
+	}
+	if ok, err := l2.SetWithFence("key", []byte("new"), time.Minute, newerToken); err != nil || !ok {
+		t.Fatalf("newer SetWithFence() = (%t, %v), want (true, nil)", ok, err)
+	}
+
+	if !cache.recoverDirtyKeys() {
+		t.Fatal("recoverDirtyKeys() = false, want true")
+	}
+	if value, _, err := l2.Get("key"); err != nil || string(value) != "new" {
+		t.Fatalf("L2 value after recovery = (%q, %v), want (new, nil)", value, err)
+	}
+}
+
+func TestTieredCacheWriterRecoveryDoesNotDeleteNewerL2Value(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	wantErr := errors.New("redis unavailable")
+	l2.setErrors(nil, wantErr)
+	errorsReported := make(chan error, 1)
+	cache := newTestTieredCacheWithInvalidationConfig(t, Config{
+		RecoveryInterval: time.Hour,
+		OnWriteError: func(_ string, err error) {
+			errorsReported <- err
+		},
+	}, l1, l2, bus)
+	waitForInvalidationCondition(t, func() bool {
+		return cache.invalidationReady.Load()
+	})
+
+	if ok, err := cache.Set("key", []byte("old"), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	select {
+	case err := <-errorsReported:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("reported error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed writer did not report an error")
+	}
+
+	l2.setErrors(nil, nil)
+	newerToken, err := l2.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence(newer operation) error = %v", err)
+	}
+	if ok, err := l2.SetWithFence("key", []byte("new"), time.Minute, newerToken); err != nil || !ok {
+		t.Fatalf("newer SetWithFence() = (%t, %v), want (true, nil)", ok, err)
+	}
+
+	if !cache.recoverDirtyKeys() {
+		t.Fatal("recoverDirtyKeys() = false, want true")
+	}
+	if value, _, err := l2.Get("key"); err != nil || string(value) != "new" {
+		t.Fatalf("L2 value after writer recovery = (%q, %v), want (new, nil)", value, err)
 	}
 }
 
@@ -226,8 +307,8 @@ func TestTieredCachePublishFailureIsRecoveredAndInvalidatesPeers(t *testing.T) {
 		return cacheA.unavailableError() == nil
 	})
 
-	if value, _, err := l2.Get("key"); err != nil || value != nil {
-		t.Fatalf("dirty L2 key after recovery = (%q, %v), want (nil, nil)", value, err)
+	if value, _, err := l2.Get("key"); err != nil || string(value) != "new" {
+		t.Fatalf("L2 value after publish-only recovery = (%q, %v), want (new, nil)", value, err)
 	}
 }
 

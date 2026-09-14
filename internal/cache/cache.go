@@ -42,5 +42,5 @@ type FencedCache interface {
 	ForeverWithFence(key string, value []byte, token FenceToken) (bool, error)
 	ForgetWithFence(key string) (bool, error)
 	ForgetIfFence(key string, token FenceToken) (bool, error)
-	TouchWithFence(key string, ttl time.Duration) (bool, error)
+	TouchWithFence(key string, ttl time.Duration, token FenceToken) (bool, error)
 }

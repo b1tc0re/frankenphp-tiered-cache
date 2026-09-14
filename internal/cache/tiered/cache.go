@@ -196,7 +196,7 @@ type TieredCache struct {
 	recoveryStop       chan struct{}
 	recoveryDone       chan struct{}
 	dirtyMu            sync.Mutex
-	dirtyKeys          map[string]struct{}
+	dirtyKeys          map[string]cachecontract.FenceToken
 	pendingFlushMu     sync.Mutex
 	pendingFlush       bool
 	mutationMu         sync.Mutex
@@ -273,7 +273,7 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		recoveryWake:          make(chan struct{}, 1),
 		recoveryStop:          make(chan struct{}),
 		recoveryDone:          make(chan struct{}),
-		dirtyKeys:             make(map[string]struct{}),
+		dirtyKeys:             make(map[string]cachecontract.FenceToken),
 		keyGenerations:        make(map[string]keyGenerationState),
 		invalidationBus:       bus,
 		invalidationOrigin:    invalidationOrigin,
@@ -378,10 +378,11 @@ func (c *TieredCache) waitForL1Flush() {
 	}
 }
 
-func (c *TieredCache) markDirty(key string) {
+func (c *TieredCache) markDirtyWithFence(key string, token cachecontract.FenceToken) {
 	// A key is retained only until the next successful recovery cleanup.
+	// An empty token is valid only for a TieredCache without fenced L2.
 	c.dirtyMu.Lock()
-	c.dirtyKeys[key] = struct{}{}
+	c.dirtyKeys[key] = token
 	c.dirtyMu.Unlock()
 }
 
@@ -495,10 +496,15 @@ func (c *TieredCache) recoverDirtyKeys() bool {
 	c.dirtyMu.Lock()
 	defer c.dirtyMu.Unlock()
 
-	for key := range c.dirtyKeys {
+	for key, token := range c.dirtyKeys {
 		var err error
 		if c.fencedL2 != nil {
-			_, err = c.fencedL2.ForgetWithFence(key)
+			if token == "" {
+				// Never fall back to an unconditional delete in fenced mode:
+				// another pod may have completed a newer mutation already.
+				return false
+			}
+			_, err = c.fencedL2.ForgetIfFence(key, token)
 		} else {
 			_, err = c.l2.Forget(key)
 		}
@@ -794,11 +800,24 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 		c.mutationMu.Unlock()
 		return false, err
 	}
-	l1Removed, l1Err := c.l1.Forget(key)
-	var l2Removed bool
+	var fenceToken cachecontract.FenceToken
 	var l2Err error
 	if c.fencedL2 != nil {
-		l2Removed, l2Err = c.fencedL2.ForgetWithFence(key)
+		fenceToken, l2Err = c.fencedL2.ReserveFence(key)
+		if l2Err != nil {
+			newlyDegraded, flushDone := c.transitionToDegraded(l2Err)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return false, c.unavailableError()
+		}
+	}
+
+	l1Removed, l1Err := c.l1.Forget(key)
+	var l2Removed bool
+	if c.fencedL2 != nil {
+		l2Removed, l2Err = c.fencedL2.ForgetIfFence(key, fenceToken)
 	} else {
 		l2Removed, l2Err = c.l2.Forget(key)
 	}
@@ -809,7 +828,7 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	backendErr := errors.Join(l1Err, l2Err, publishErr)
 	if backendErr != nil {
 		if l2Err != nil || publishErr != nil {
-			c.markDirty(key)
+			c.markDirtyWithFence(key, fenceToken)
 		}
 		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
 		if newlyDegraded {
@@ -846,11 +865,24 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		c.mutationMu.Unlock()
 		return false, err
 	}
-	l1Touched, l1Err := c.l1.Touch(key, ttl)
-	var l2Touched bool
+	var fenceToken cachecontract.FenceToken
 	var l2Err error
 	if c.fencedL2 != nil {
-		l2Touched, l2Err = c.fencedL2.TouchWithFence(key, ttl)
+		fenceToken, l2Err = c.fencedL2.ReserveFence(key)
+		if l2Err != nil {
+			newlyDegraded, flushDone := c.transitionToDegraded(l2Err)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return false, c.unavailableError()
+		}
+	}
+
+	l1Touched, l1Err := c.l1.Touch(key, ttl)
+	var l2Touched bool
+	if c.fencedL2 != nil {
+		l2Touched, l2Err = c.fencedL2.TouchWithFence(key, ttl, fenceToken)
 	} else {
 		l2Touched, l2Err = c.l2.Touch(key, ttl)
 	}
@@ -861,7 +893,7 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	backendErr := errors.Join(l1Err, l2Err, publishErr)
 	if backendErr != nil {
 		if l2Err != nil || publishErr != nil {
-			c.markDirty(key)
+			c.markDirtyWithFence(key, fenceToken)
 		}
 		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
 		if newlyDegraded {
@@ -992,7 +1024,7 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 		c.pending.cancel(operation.key)
 		c.endWriteGeneration(operation.key)
 		if errors.Is(err, ErrWriteQueueTimeout) {
-			c.markDirty(operation.key)
+			c.markDirtyWithFence(operation.key, operation.fenceToken)
 			newlyDegraded, flushDone := c.transitionToDegraded(err)
 			if newlyDegraded {
 				c.flushL1Locked(flushDone)
@@ -1066,7 +1098,7 @@ func (c *TieredCache) runWriter() {
 		newlyDegraded := false
 		var flushDone chan struct{}
 		if err != nil {
-			c.markDirty(operation.key)
+			c.markDirtyWithFence(operation.key, operation.fenceToken)
 			newlyDegraded, flushDone = c.transitionToDegraded(err)
 		}
 		c.pending.complete(operation.key)

@@ -116,12 +116,20 @@ func TestRedisCacheFencingCleansSuccessfulMutationTokens(t *testing.T) {
 	}
 	assertFenceFieldAbsent(t, client, cache, "key")
 
-	if ok, err := cache.TouchWithFence("key", time.Minute); err != nil || !ok {
+	token, err = cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("ReserveFence() before TouchWithFence() error = %v", err)
+	}
+	if ok, err := cache.TouchWithFence("key", time.Minute, token); err != nil || !ok {
 		t.Fatalf("TouchWithFence(existing) = (%t, %v), want (true, nil)", ok, err)
 	}
 	assertFenceFieldAbsent(t, client, cache, "key")
 
-	if ok, err := cache.TouchWithFence("missing", time.Minute); err != nil || ok {
+	token, err = cache.ReserveFence("missing")
+	if err != nil {
+		t.Fatalf("ReserveFence(missing) error = %v", err)
+	}
+	if ok, err := cache.TouchWithFence("missing", time.Minute, token); err != nil || ok {
 		t.Fatalf("TouchWithFence(missing) = (%t, %v), want (false, nil)", ok, err)
 	}
 	assertFenceFieldAbsent(t, client, cache, "missing")
@@ -522,10 +530,9 @@ func (f *fakeClient) Eval(_ context.Context, script string, keys []string, args 
 		if !fieldOK || !tokenOK {
 			return nil, errors.New("invalid fake fenced touch values")
 		}
-		if f.hashes[keys[1]] == nil {
-			f.hashes[keys[1]] = make(map[string][]byte)
+		if string(f.hashes[keys[1]][field]) != token {
+			return int64(0), nil
 		}
-		f.hashes[keys[1]][field] = []byte(token)
 		if _, exists := f.values[valueKey]; !exists {
 			delete(f.hashes[keys[1]], field)
 			return int64(0), nil
