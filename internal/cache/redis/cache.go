@@ -77,9 +77,8 @@ func (c redisClient) Close() error {
 // the composition layer, such as TieredCache, so this backend remains usable
 // on its own and has straightforward operation and shutdown semantics.
 type RedisCache struct {
-	client     client
-	prefix     string
-	fenceLease time.Duration
+	client client
+	prefix string
 
 	closeOnce sync.Once
 	closeErr  error
@@ -92,51 +91,51 @@ const (
 	fenceMetadataPrefix = "\x00frankenphp-tiered-cache/fence:"
 
 	reserveFenceScript = `
-redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
 return 1
 `
 
 	releaseFenceScript = `
-if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+if redis.call("HGET", KEYS[1], ARGV[1]) ~= ARGV[2] then
     return 0
 end
-return redis.call("DEL", KEYS[1])
+return redis.call("HDEL", KEYS[1], ARGV[1])
 `
 
 	setWithFenceScript = `
-local current = redis.call("GET", KEYS[2])
-if current ~= ARGV[1] then
+local current = redis.call("HGET", KEYS[2], ARGV[1])
+if current ~= ARGV[2] then
     return 0
 end
-if ARGV[3] == "0" then
-	redis.call("SET", KEYS[1], ARGV[2])
+if ARGV[4] == "0" then
+    redis.call("SET", KEYS[1], ARGV[3])
 else
-	redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+    redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
 end
-redis.call("DEL", KEYS[2])
+redis.call("HDEL", KEYS[2], ARGV[1])
 return 1
 `
 
 	forgetWithFenceScript = `
-redis.call("DEL", KEYS[2])
+redis.call("HDEL", KEYS[2], ARGV[1])
 return redis.call("DEL", KEYS[1])
 `
 
 	forgetIfFenceScript = `
-if redis.call("GET", KEYS[2]) ~= ARGV[1] then
+if redis.call("HGET", KEYS[2], ARGV[1]) ~= ARGV[2] then
     return 0
 end
-redis.call("DEL", KEYS[2])
+redis.call("HDEL", KEYS[2], ARGV[1])
 return redis.call("DEL", KEYS[1])
 `
 
 	touchWithFenceScript = `
-local current = redis.call("GET", KEYS[2])
-if current ~= ARGV[1] then
+local current = redis.call("HGET", KEYS[2], ARGV[1])
+if current ~= ARGV[2] then
     return 0
 end
-local touched = redis.call("EXPIRE", KEYS[1], ARGV[2])
-redis.call("DEL", KEYS[2])
+local touched = redis.call("EXPIRE", KEYS[1], ARGV[3])
+redis.call("HDEL", KEYS[2], ARGV[1])
 return touched
 `
 )
@@ -157,13 +156,12 @@ func New(config Config) (*RedisCache, error) {
 			ReadTimeout:  config.ReadTimeout,
 			WriteTimeout: config.WriteTimeout,
 		})},
-		prefix:     config.KeyPrefix,
-		fenceLease: config.FenceLease,
+		prefix: config.KeyPrefix,
 	}, nil
 }
 
 func newWithClient(c client, prefix string) *RedisCache {
-	return &RedisCache{client: c, prefix: prefix, fenceLease: DefaultFenceLease}
+	return &RedisCache{client: c, prefix: prefix}
 }
 
 func (c *RedisCache) Get(key string) ([]byte, time.Duration, error) {
@@ -192,16 +190,12 @@ func (c *RedisCache) ReserveFence(key string) (cachecontract.FenceToken, error) 
 	if err != nil {
 		return "", err
 	}
-	leaseMillis := c.fenceLease.Milliseconds()
-	if leaseMillis <= 0 {
-		leaseMillis = 1
-	}
 	if _, err := c.client.Eval(
 		context.Background(),
 		reserveFenceScript,
-		[]string{c.fenceKey(key)},
+		[]string{c.fenceHashKey()},
+		c.fenceField(key),
 		string(token),
-		strconv.FormatInt(leaseMillis, 10),
 	); err != nil {
 		return "", err
 	}
@@ -213,7 +207,8 @@ func (c *RedisCache) ReleaseFence(key string, token cachecontract.FenceToken) (b
 	result, err := c.client.Eval(
 		context.Background(),
 		releaseFenceScript,
-		[]string{c.fenceKey(key)},
+		[]string{c.fenceHashKey()},
+		c.fenceField(key),
 		string(token),
 	)
 	if err != nil {
@@ -265,7 +260,8 @@ func (c *RedisCache) ForgetWithFence(key string) (bool, error) {
 	result, err := c.client.Eval(
 		context.Background(),
 		forgetWithFenceScript,
-		[]string{c.prefixedKey(key), c.fenceKey(key)},
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
 	)
 	if err != nil {
 		return false, err
@@ -279,7 +275,8 @@ func (c *RedisCache) ForgetIfFence(key string, token cachecontract.FenceToken) (
 	result, err := c.client.Eval(
 		context.Background(),
 		forgetIfFenceScript,
-		[]string{c.prefixedKey(key), c.fenceKey(key)},
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
 		string(token),
 	)
 	if err != nil {
@@ -306,7 +303,8 @@ func (c *RedisCache) TouchWithFence(key string, ttl time.Duration, token cacheco
 	result, err := c.client.Eval(
 		context.Background(),
 		touchWithFenceScript,
-		[]string{c.prefixedKey(key), c.fenceKey(key)},
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
 		string(token),
 		int64((ttl+time.Second-1)/time.Second),
 	)
@@ -320,13 +318,29 @@ func (c *RedisCache) TouchWithFence(key string, ttl time.Duration, token cacheco
 
 func (c *RedisCache) Flush() (bool, error) {
 	ctx := context.Background()
-	if err := c.deleteMatching(ctx, redisScanPattern(c.prefix)); err != nil {
-		return false, err
+	match := redisScanPattern(c.prefix)
+	cursor := uint64(0)
+
+	for {
+		keys, nextCursor, err := c.client.Scan(ctx, cursor, match, flushScanCount)
+		if err != nil {
+			return false, err
+		}
+
+		if len(keys) > 0 {
+			if _, err := c.client.Del(ctx, keys...); err != nil {
+				return false, err
+			}
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			if _, err := c.client.Del(ctx, c.fenceHashKey()); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 	}
-	if err := c.deleteMatching(ctx, c.fenceKeyPrefix()+"*"); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 func (c *RedisCache) Close() error {
@@ -341,12 +355,8 @@ func (c *RedisCache) prefixedKey(key string) string {
 	return c.prefix + key
 }
 
-func (c *RedisCache) fenceKeyPrefix() string {
-	return fenceMetadataPrefix + hex.EncodeToString([]byte(c.prefix)) + ":"
-}
-
-func (c *RedisCache) fenceKey(key string) string {
-	return c.fenceKeyPrefix() + c.fenceField(key)
+func (c *RedisCache) fenceHashKey() string {
+	return fenceMetadataPrefix + hex.EncodeToString([]byte(c.prefix))
 }
 
 func (c *RedisCache) fenceField(key string) string {
@@ -358,7 +368,8 @@ func (c *RedisCache) evalFenceWrite(key string, value []byte, token cachecontrac
 	result, err := c.client.Eval(
 		context.Background(),
 		setWithFenceScript,
-		[]string{c.prefixedKey(key), c.fenceKey(key)},
+		[]string{c.prefixedKey(key), c.fenceHashKey()},
+		c.fenceField(key),
 		string(token),
 		value,
 		ttlMillis,
@@ -369,25 +380,6 @@ func (c *RedisCache) evalFenceWrite(key string, value []byte, token cachecontrac
 
 	stored, err := redisIntegerResult(result)
 	return stored > 0, err
-}
-
-func (c *RedisCache) deleteMatching(ctx context.Context, match string) error {
-	cursor := uint64(0)
-	for {
-		keys, nextCursor, err := c.client.Scan(ctx, cursor, match, flushScanCount)
-		if err != nil {
-			return err
-		}
-		if len(keys) > 0 {
-			if _, err := c.client.Del(ctx, keys...); err != nil {
-				return err
-			}
-		}
-		cursor = nextCursor
-		if cursor == 0 {
-			return nil
-		}
-	}
 }
 
 func newFenceToken() (cachecontract.FenceToken, error) {
