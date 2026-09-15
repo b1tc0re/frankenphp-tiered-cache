@@ -38,6 +38,7 @@ type FencedCache interface {
 	Cache
 
 	ReserveFence(key string) (FenceToken, error)
+	ReleaseFence(key string, token FenceToken) (bool, error)
 	SetWithFence(key string, value []byte, ttl time.Duration, token FenceToken) (bool, error)
 	ForeverWithFence(key string, value []byte, token FenceToken) (bool, error)
 	ForgetWithFence(key string) (bool, error)

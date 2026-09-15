@@ -648,6 +648,17 @@ func (f *fakeCache) ReserveFence(key string) (cachecontract.FenceToken, error) {
 	return token, nil
 }
 
+func (f *fakeCache) ReleaseFence(key string, token cachecontract.FenceToken) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.fenceTokens[key] != token {
+		return false, nil
+	}
+	delete(f.fenceTokens, key)
+	return true, nil
+}
+
 func (f *fakeCache) SetWithFence(key string, keyValue []byte, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
 	return f.setWithFence(key, keyValue, ttl, token, false)
 }
@@ -851,6 +862,12 @@ func (f *fakeCache) setForgetError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.forgetErr = err
+}
+
+func (f *fakeCache) setTouchError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.touchErr = err
 }
 
 func (f *fakeCache) setFlushError(err error) {

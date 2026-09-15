@@ -95,6 +95,13 @@ redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
 return 1
 `
 
+	releaseFenceScript = `
+if redis.call("HGET", KEYS[1], ARGV[1]) ~= ARGV[2] then
+    return 0
+end
+return redis.call("HDEL", KEYS[1], ARGV[1])
+`
+
 	setWithFenceScript = `
 local current = redis.call("HGET", KEYS[2], ARGV[1])
 if current ~= ARGV[2] then
@@ -194,6 +201,22 @@ func (c *RedisCache) ReserveFence(key string) (cachecontract.FenceToken, error) 
 	}
 
 	return token, nil
+}
+
+func (c *RedisCache) ReleaseFence(key string, token cachecontract.FenceToken) (bool, error) {
+	result, err := c.client.Eval(
+		context.Background(),
+		releaseFenceScript,
+		[]string{c.fenceHashKey()},
+		c.fenceField(key),
+		string(token),
+	)
+	if err != nil {
+		return false, err
+	}
+
+	released, err := redisIntegerResult(result)
+	return released > 0, err
 }
 
 func (c *RedisCache) SetWithFence(key string, value []byte, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {

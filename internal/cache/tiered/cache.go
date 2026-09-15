@@ -386,6 +386,15 @@ func (c *TieredCache) markDirtyWithFence(key string, token cachecontract.FenceTo
 	c.dirtyMu.Unlock()
 }
 
+func (c *TieredCache) releaseFence(key string, token cachecontract.FenceToken) error {
+	if c.fencedL2 == nil || token == "" {
+		return nil
+	}
+
+	_, err := c.fencedL2.ReleaseFence(key, token)
+	return err
+}
+
 // beginWriteGeneration registers an async write before it enters the queue.
 // The pending count keeps a generation entry alive while a worker may still
 // compare against it, without retaining every key invalidated over the cache
@@ -815,6 +824,19 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	}
 
 	l1Removed, l1Err := c.l1.Forget(key)
+	if l1Err != nil {
+		if releaseErr := c.releaseFence(key, fenceToken); releaseErr != nil {
+			c.markDirtyWithFence(key, fenceToken)
+			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return l1Removed, errors.Join(l1Err, c.unavailableError())
+		}
+		c.mutationMu.Unlock()
+		return l1Removed, l1Err
+	}
 	var l2Removed bool
 	if c.fencedL2 != nil {
 		l2Removed, l2Err = c.fencedL2.ForgetIfFence(key, fenceToken)
@@ -880,6 +902,19 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	l1Touched, l1Err := c.l1.Touch(key, ttl)
+	if l1Err != nil {
+		if releaseErr := c.releaseFence(key, fenceToken); releaseErr != nil {
+			c.markDirtyWithFence(key, fenceToken)
+			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return l1Touched, errors.Join(l1Err, c.unavailableError())
+		}
+		c.mutationMu.Unlock()
+		return l1Touched, l1Err
+	}
 	var l2Touched bool
 	if c.fencedL2 != nil {
 		l2Touched, l2Err = c.fencedL2.TouchWithFence(key, ttl, fenceToken)
@@ -1013,6 +1048,15 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 		stored, err = c.l1.Set(operation.key, operation.value, operation.ttl)
 	}
 	if err != nil || !stored {
+		if releaseErr := c.releaseFence(operation.key, operation.fenceToken); releaseErr != nil {
+			c.markDirtyWithFence(operation.key, operation.fenceToken)
+			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return stored, errors.Join(err, c.unavailableError())
+		}
 		c.mutationMu.Unlock()
 		return stored, err
 	}
@@ -1031,6 +1075,15 @@ func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
 			}
 			c.mutationMu.Unlock()
 			return false, c.unavailableError()
+		}
+		if releaseErr := c.releaseFence(operation.key, operation.fenceToken); releaseErr != nil {
+			c.markDirtyWithFence(operation.key, operation.fenceToken)
+			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
+			if newlyDegraded {
+				c.flushL1Locked(flushDone)
+			}
+			c.mutationMu.Unlock()
+			return false, errors.Join(err, c.unavailableError())
 		}
 		c.mutationMu.Unlock()
 		return false, err

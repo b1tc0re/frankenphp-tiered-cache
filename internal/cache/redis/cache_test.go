@@ -103,6 +103,31 @@ func TestRedisCacheFencingAllowsLatestWrite(t *testing.T) {
 	}
 }
 
+func TestRedisCacheReleaseFenceIsConditional(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	first, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("first ReserveFence() error = %v", err)
+	}
+	second, err := cache.ReserveFence("key")
+	if err != nil {
+		t.Fatalf("second ReserveFence() error = %v", err)
+	}
+
+	if released, err := cache.ReleaseFence("key", first); err != nil || released {
+		t.Fatalf("ReleaseFence(stale) = (%t, %v), want (false, nil)", released, err)
+	}
+	if released, err := cache.ReleaseFence("key", second); err != nil || !released {
+		t.Fatalf("ReleaseFence(current) = (%t, %v), want (true, nil)", released, err)
+	}
+	assertFenceFieldAbsent(t, client, cache, "key")
+	if ok, err := cache.SetWithFence("key", []byte("stale"), time.Minute, second); err != nil || ok {
+		t.Fatalf("SetWithFence() after release = (%t, %v), want (false, nil)", ok, err)
+	}
+}
+
 func TestRedisCacheFencingCleansSuccessfulMutationTokens(t *testing.T) {
 	client := newFakeClient()
 	cache := newWithClient(client, "test:")
@@ -443,6 +468,21 @@ func (f *fakeClient) Eval(_ context.Context, script string, keys []string, args 
 			f.hashes[keys[0]] = make(map[string][]byte)
 		}
 		f.hashes[keys[0]][field] = []byte(token)
+		return int64(1), nil
+
+	case releaseFenceScript:
+		if len(keys) != 1 || len(args) != 2 {
+			return nil, errors.New("invalid fake release fence arguments")
+		}
+		field, fieldOK := args[0].(string)
+		token, tokenOK := args[1].(string)
+		if !fieldOK || !tokenOK {
+			return nil, errors.New("invalid fake release fence values")
+		}
+		if string(f.hashes[keys[0]][field]) != token {
+			return int64(0), nil
+		}
+		delete(f.hashes[keys[0]], field)
 		return int64(1), nil
 
 	case setWithFenceScript:

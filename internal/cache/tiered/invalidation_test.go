@@ -191,6 +191,61 @@ func TestTieredCacheRecoveryDeletesL2BeforePublishingInvalidation(t *testing.T) 
 	}
 }
 
+func TestTieredCacheReleasesFenceAfterL1MutationFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*fakeCache, error)
+		call func(*TieredCache) (bool, error)
+	}{
+		{
+			name: "set",
+			set:  func(l1 *fakeCache, err error) { l1.setErrors(nil, err) },
+			call: func(cache *TieredCache) (bool, error) {
+				return cache.Set("key", []byte("value"), time.Minute)
+			},
+		},
+		{
+			name: "forget",
+			set:  func(l1 *fakeCache, err error) { l1.setForgetError(err) },
+			call: func(cache *TieredCache) (bool, error) {
+				return cache.Forget("key")
+			},
+		},
+		{
+			name: "touch",
+			set:  func(l1 *fakeCache, err error) { l1.setTouchError(err) },
+			call: func(cache *TieredCache) (bool, error) {
+				return cache.Touch("key", time.Minute)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bus := newFakeInvalidationBus()
+			l1 := newFakeCache()
+			l2 := newFakeCache()
+			cache := newTestTieredCacheWithInvalidation(t, l1, l2, bus)
+			waitForInvalidationCondition(t, func() bool {
+				return cache.invalidationReady.Load()
+			})
+
+			wantErr := errors.New("L1 unavailable")
+			test.set(l1, wantErr)
+			if _, err := test.call(cache); !errors.Is(err, wantErr) {
+				t.Fatalf("operation error = %v, want %v", err, wantErr)
+			}
+
+			l2.mu.Lock()
+			_, hasFence := l2.fenceTokens["key"]
+			l2.mu.Unlock()
+			if hasFence {
+				t.Fatal("L2 fence remains after failed L1 mutation")
+			}
+		})
+	}
+}
+
 func TestTieredCacheRecoveryDoesNotDeleteNewerL2Value(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	l1 := newFakeCache()
