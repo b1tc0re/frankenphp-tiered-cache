@@ -2,23 +2,16 @@ package tiered
 
 import (
 	"errors"
-	"runtime"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
-
-	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 )
 
 func TestTieredCacheGetChecksL1BeforeL2(t *testing.T) {
 	l1 := newFakeCache()
+	l1.put("key", []byte("l1"), time.Minute)
 	l2 := newFakeCache()
-	l1.values["key"] = []byte("l1")
-	l1.ttls["key"] = time.Minute
-	l2.values["key"] = []byte("l2")
-	l2.ttls["key"] = 2 * time.Minute
-
+	l2.getErr = errors.New("L2 must not be called")
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
 	value, ttl, err := cache.Get("key")
@@ -28,17 +21,15 @@ func TestTieredCacheGetChecksL1BeforeL2(t *testing.T) {
 	if string(value) != "l1" || ttl != time.Minute {
 		t.Fatalf("Get() = (%q, %v), want (l1, %v)", value, ttl, time.Minute)
 	}
-	if l2.getCount() != 0 {
-		t.Fatalf("L2 Get() calls = %d, want 0", l2.getCount())
+	if got := l2.getCount(); got != 0 {
+		t.Fatalf("L2 Get() calls = %d, want 0", got)
 	}
 }
 
 func TestTieredCacheGetWarmsL1WithRemainingTTL(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
-	l2.values["key"] = []byte("value")
-	l2.ttls["key"] = 42 * time.Second
-
+	l2.put("key", []byte("value"), 42*time.Second)
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
 	value, ttl, err := cache.Get("key")
@@ -48,516 +39,253 @@ func TestTieredCacheGetWarmsL1WithRemainingTTL(t *testing.T) {
 	if string(value) != "value" || ttl != 42*time.Second {
 		t.Fatalf("Get() = (%q, %v), want (value, %v)", value, ttl, 42*time.Second)
 	}
-
-	warmedValue, warmedTTL, err := l1.Get("key")
+	_, l1TTL, err := l1.Get("key")
 	if err != nil {
-		t.Fatalf("warmed L1 Get() error = %v", err)
+		t.Fatalf("L1 Get() error = %v", err)
 	}
-	if string(warmedValue) != "value" || warmedTTL != 42*time.Second {
-		t.Fatalf("warmed L1 = (%q, %v), want (value, %v)", warmedValue, warmedTTL, 42*time.Second)
+	if l1TTL != 42*time.Second {
+		t.Fatalf("warmed L1 TTL = %v, want %v", l1TTL, 42*time.Second)
 	}
 }
 
 func TestTieredCacheGetWarmsL1ForeverValue(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
-	l2.values["key"] = []byte("value")
-	l2.ttls["key"] = 0
-
+	l2.put("key", []byte("value"), 0)
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
-	if _, _, err := cache.Get("key"); err != nil {
-		t.Fatalf("Get() error = %v", err)
+	if value, ttl, err := cache.Get("key"); err != nil || string(value) != "value" || ttl != 0 {
+		t.Fatalf("Get() = (%q, %v, %v), want (value, 0, nil)", value, ttl, err)
 	}
-
-	_, ttl, err := l1.Get("key")
+	_, l1TTL, err := l1.Get("key")
 	if err != nil {
-		t.Fatalf("warmed L1 Get() error = %v", err)
+		t.Fatalf("L1 Get() error = %v", err)
 	}
-	if ttl != 0 {
-		t.Fatalf("warmed L1 TTL = %v, want 0", ttl)
+	if l1TTL != 0 {
+		t.Fatalf("warmed L1 TTL = %v, want 0", l1TTL)
 	}
 }
 
-func TestTieredCacheDoesNotWarmL1AfterConcurrentFlush(t *testing.T) {
+func TestTieredCacheGetDoesNotWarmStaleL2AfterLocalMutation(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
-	l2.values["key"] = []byte("stale")
-	l2.ttls["key"] = time.Minute
-
-	l2Read := make(chan struct{})
-	allowL2Return := make(chan struct{})
-	l2.getHook = func() {
-		close(l2Read)
-		<-allowL2Return
-	}
-
+	l2.put("key", []byte("old"), time.Minute)
+	l2.getStarted = make(chan struct{}, 1)
+	l2.releaseGet = make(chan struct{})
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
-	type getResult struct {
+	result := make(chan struct {
 		value []byte
-		ttl   time.Duration
 		err   error
-	}
-	getDone := make(chan getResult, 1)
+	}, 1)
 	go func() {
-		value, ttl, err := cache.Get("key")
-		getDone <- getResult{value: value, ttl: ttl, err: err}
+		value, _, err := cache.Get("key")
+		result <- struct {
+			value []byte
+			err   error
+		}{value: value, err: err}
 	}()
 
 	select {
-	case <-l2Read:
+	case <-l2.getStarted:
 	case <-time.After(time.Second):
 		t.Fatal("L2 Get() did not start")
 	}
+	if ok, err := cache.Set("key", []byte("new"), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	close(l2.releaseGet)
 
-	flushDone := make(chan struct {
+	select {
+	case got := <-result:
+		if got.err != nil || string(got.value) != "new" {
+			t.Fatalf("Get() = (%q, %v), want (new, nil)", got.value, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Get() did not finish")
+	}
+	if value, _, err := l1.Get("key"); err != nil || string(value) != "new" {
+		t.Fatalf("L1 after race = (%q, %v), want (new, nil)", value, err)
+	}
+}
+
+func TestTieredCacheSetIsSynchronousAndWritesRedisBeforeL1(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.setStarted = make(chan struct{}, 1)
+	l2.releaseSet = make(chan struct{})
+	var orderMu sync.Mutex
+	var order []string
+	l2.setHook = func() {
+		orderMu.Lock()
+		order = append(order, "redis")
+		orderMu.Unlock()
+	}
+	l1.setHook = func() {
+		orderMu.Lock()
+		order = append(order, "l1")
+		orderMu.Unlock()
+	}
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	result := make(chan struct {
 		ok  bool
 		err error
 	}, 1)
 	go func() {
-		ok, err := cache.Flush()
-		flushDone <- struct {
+		ok, err := cache.Set("key", []byte("value"), time.Minute)
+		result <- struct {
 			ok  bool
 			err error
 		}{ok: ok, err: err}
 	}()
 
 	select {
-	case result := <-flushDone:
-		if result.err != nil || !result.ok {
-			t.Fatalf("Flush() = (%t, %v), want (true, nil)", result.ok, result.err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Flush() did not finish")
-	}
-	close(allowL2Return)
-
-	select {
-	case result := <-getDone:
-		if result.err != nil {
-			t.Fatalf("Get() error = %v", result.err)
-		}
-		if result.value != nil || result.ttl != 0 {
-			t.Fatalf("Get() after Flush() = (%q, %v), want (nil, 0)", result.value, result.ttl)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Get() did not finish")
-	}
-}
-
-func TestTieredCacheSetDoesNotWaitForL2(t *testing.T) {
-	l1 := newFakeCache()
-	l2 := newFakeCache()
-	l2.setStarted = make(chan struct{}, 1)
-	l2.releaseSet = make(chan struct{})
-	cache := newTestTieredCache(t, Config{WriteQueueCapacity: 1}, l1, l2)
-
-	start := time.Now()
-	ok, err := cache.Set("key", []byte("value"), time.Minute)
-	if err != nil || !ok {
-		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
-	}
-	if elapsed := time.Since(start); elapsed >= 50*time.Millisecond {
-		t.Fatalf("Set() took %v while L2 was blocked", elapsed)
-	}
-
-	select {
 	case <-l2.setStarted:
 	case <-time.After(time.Second):
-		t.Fatal("L2 worker did not receive Set()")
-	}
-	close(l2.releaseSet)
-	if err := cache.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-}
-
-func TestTieredCacheSetWaitsForQueueSpaceUntilTimeout(t *testing.T) {
-	l1 := newFakeCache()
-	l2 := newFakeCache()
-	l2.values["second"] = []byte("old")
-	l2.ttls["second"] = time.Minute
-	l2.setStarted = make(chan struct{}, 1)
-	l2.releaseSet = make(chan struct{})
-	cache := newTestTieredCache(t, Config{
-		WriteQueueCapacity:    1,
-		WriteQueueWaitTimeout: 20 * time.Millisecond,
-		RecoveryInterval:      10 * time.Millisecond,
-	}, l1, l2)
-
-	if ok, err := cache.Set("first", []byte("1"), time.Minute); err != nil || !ok {
-		t.Fatalf("first Set() = (%t, %v), want (true, nil)", ok, err)
+		t.Fatal("Redis Set() did not start")
 	}
 	select {
-	case <-l2.setStarted:
-	case <-time.After(time.Second):
-		t.Fatal("L2 worker did not receive first Set()")
-	}
-
-	ok, err := cache.Set("second", []byte("2"), time.Minute)
-	if ok || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, ErrWriteQueueTimeout) {
-		t.Fatalf("second Set() = (%t, %v), want (false, ErrL2Unavailable wrapping ErrWriteQueueTimeout)", ok, err)
-	}
-	if value, _, _ := l1.Get("second"); value != nil {
-		t.Fatalf("L1 second value = %q, want nil after degraded transition", value)
-	}
-
-	close(l2.releaseSet)
-	deadline := time.Now().Add(time.Second)
-	for {
-		value, _, err := l2.Get("second")
-		if err != nil {
-			t.Fatalf("L2 Get(second) = %v", err)
-		}
-		if value == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("queue-timeout dirty key was not removed during recovery")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if err := cache.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-}
-
-func TestTieredCacheForgetWaitsForQueuedWrites(t *testing.T) {
-	l1 := newFakeCache()
-	l2 := newFakeCache()
-	l2.setStarted = make(chan struct{}, 1)
-	l2.releaseSet = make(chan struct{})
-	cache := newTestTieredCache(t, Config{WriteQueueCapacity: 1}, l1, l2)
-
-	if ok, err := cache.Set("key", []byte("value"), time.Minute); err != nil || !ok {
-		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
-	}
-	select {
-	case <-l2.setStarted:
-	case <-time.After(time.Second):
-		t.Fatal("L2 worker did not receive Set()")
-	}
-
-	done := make(chan struct{})
-	go func() {
-		_, _ = cache.Forget("key")
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("Forget() returned before queued L2 write completed")
+	case got := <-result:
+		t.Fatalf("Set() returned before Redis completed: (%t, %v)", got.ok, got.err)
 	case <-time.After(20 * time.Millisecond):
 	}
-
 	close(l2.releaseSet)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Forget() did not finish after queued write completed")
-	}
 
-	if value, _, _ := l1.Get("key"); value != nil {
-		t.Fatalf("L1 key = %q after Forget(), want nil", value)
+	select {
+	case got := <-result:
+		if got.err != nil || !got.ok {
+			t.Fatalf("Set() = (%t, %v), want (true, nil)", got.ok, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Set() did not finish")
 	}
-	if value, _, _ := l2.Get("key"); value != nil {
-		t.Fatalf("L2 key = %q after Forget(), want nil", value)
-	}
-	if err := cache.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	if got, want := order, []string{"redis", "l1"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("mutation order = %v, want %v", got, want)
 	}
 }
 
-func TestTieredCacheAsyncWriteErrorIsReported(t *testing.T) {
+func TestTieredCacheRedisSetErrorDoesNotChangeL1(t *testing.T) {
 	l1 := newFakeCache()
+	l1.put("key", []byte("old"), time.Minute)
 	l2 := newFakeCache()
-	wantErr := errors.New("redis unavailable")
+	wantErr := errors.New("Redis unavailable")
 	l2.setErr = wantErr
-	errorsReported := make(chan error, 1)
-	cache := newTestTieredCache(t, Config{
-		OnWriteError: func(_ string, err error) {
-			errorsReported <- err
-		},
-	}, l1, l2)
-
-	if ok, err := cache.Set("key", []byte("value"), time.Minute); err != nil || !ok {
-		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
-	}
-
-	select {
-	case err := <-errorsReported:
-		if !errors.Is(err, wantErr) {
-			t.Fatalf("reported error = %v, want %v", err, wantErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("async write error was not reported")
-	}
-	if err := cache.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-}
-
-func TestTieredCacheSynchronousOperationsUseBothLevels(t *testing.T) {
-	l1 := newFakeCache()
-	l2 := newFakeCache()
-	l1.values["key"] = []byte("value")
-	l2.values["key"] = []byte("value")
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
-	touched, err := cache.Touch("key", time.Minute)
-	if err != nil || !touched {
-		t.Fatalf("Touch() = (%t, %v), want (true, nil)", touched, err)
+	ok, err := cache.Set("key", []byte("new"), time.Minute)
+	if ok || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("Set() = (%t, %v), want (false, unavailable wrapping Redis error)", ok, err)
 	}
-	if _, ttl, _ := l1.Get("key"); ttl != time.Minute {
-		t.Fatalf("L1 TTL after Touch() = %v, want %v", ttl, time.Minute)
+	value, _, getErr := l1.Get("key")
+	if getErr != nil || string(value) != "old" {
+		t.Fatalf("L1 after Redis failure = (%q, %v), want (old, nil)", value, getErr)
 	}
-	if _, ttl, _ := l2.Get("key"); ttl != time.Minute {
-		t.Fatalf("L2 TTL after Touch() = %v, want %v", ttl, time.Minute)
-	}
-
-	flushed, err := cache.Flush()
-	if err != nil || !flushed {
-		t.Fatalf("Flush() = (%t, %v), want (true, nil)", flushed, err)
-	}
-	if value, _, _ := l1.Get("key"); value != nil {
-		t.Fatalf("L1 key = %q after Flush(), want nil", value)
-	}
-	if value, _, _ := l2.Get("key"); value != nil {
-		t.Fatalf("L2 key = %q after Flush(), want nil", value)
+	if got := l1.setCount(); got != 0 {
+		t.Fatalf("L1 Set() calls = %d, want 0", got)
 	}
 }
 
-func TestTieredCacheFlushFailureIsNotRetriedDuringRecovery(t *testing.T) {
+func TestTieredCacheRedisFailureRecoveryClearsL1BeforeHealthy(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("key", []byte("old"), time.Minute)
+	l2 := newFakeCache()
+	l2.setErr = errors.New("Redis unavailable")
+	cache := newTestTieredCache(t, Config{RecoveryInterval: 5 * time.Millisecond}, l1, l2)
+
+	if ok, err := cache.Set("key", []byte("new"), time.Minute); ok || err == nil {
+		t.Fatalf("Set() = (%t, %v), want false and error", ok, err)
+	}
+	l2.mu.Lock()
+	l2.setErr = nil
+	l2.mu.Unlock()
+	waitForTieredCondition(t, func() bool {
+		return cache.unavailableError() == nil
+	})
+	if value, _, err := l1.Get("key"); err != nil || value != nil {
+		t.Fatalf("L1 after recovery = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
+func TestTieredCacheCommittedRedisValueSurvivesL1Failure(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
-	l1.values["key"] = []byte("value")
-	l2.values["key"] = []byte("value")
-	wantErr := errors.New("redis flush failed")
-	l2.setFlushError(wantErr)
+	wantErr := errors.New("L1 unavailable")
+	l1.setErr = wantErr
+	cache := newTestTieredCache(t, Config{}, l1, l2)
 
-	cache := newTestTieredCache(t, Config{RecoveryInterval: 10 * time.Millisecond}, l1, l2)
-
-	flushed, err := cache.Flush()
-	if flushed || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
-		t.Fatalf("Flush() = (%t, %v), want (false, L2 unavailable wrapping %v)", flushed, err, wantErr)
+	ok, err := cache.Set("key", []byte("value"), time.Minute)
+	if !ok || !errors.Is(err, wantErr) {
+		t.Fatalf("Set() = (%t, %v), want (true, L1 error)", ok, err)
 	}
-	if value, _, _ := l1.Get("key"); value != nil {
-		t.Fatalf("L1 key after failed Flush() = %q, want nil", value)
-	}
-
-	deadline := time.Now().Add(time.Second)
-	for {
-		ok, err := cache.Set("after-recovery", []byte("value"), time.Minute)
-		if ok && err == nil {
-			break
-		}
-		if !errors.Is(err, ErrL2Unavailable) {
-			t.Fatalf("Set() during recovery = (%t, %v), want temporary L2 unavailable", ok, err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("TieredCache did not recover after failed Flush()")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	if got := l2.flushCount(); got != 1 {
-		t.Fatalf("L2 Flush() calls = %d, want 1", got)
-	}
-	if value, _, err := l2.Get("key"); err != nil || string(value) != "value" {
-		t.Fatalf("L2 key after failed Flush() = (%q, %v), want (value, nil)", value, err)
+	value, _, getErr := l2.Get("key")
+	if getErr != nil || string(value) != "value" {
+		t.Fatalf("L2 after L1 failure = (%q, %v), want (value, nil)", value, getErr)
 	}
 }
 
-func TestTieredCacheCloseIsIdempotent(t *testing.T) {
+func TestTieredCacheSynchronousMutationsUseBothLevels(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
-	if err := cache.Close(); err != nil {
-		t.Fatalf("first Close() error = %v", err)
+	if ok, err := cache.Forever("key", []byte("value")); err != nil || !ok {
+		t.Fatalf("Forever() = (%t, %v), want (true, nil)", ok, err)
 	}
-	if err := cache.Close(); err != nil {
-		t.Fatalf("second Close() error = %v", err)
+	if ok, err := cache.Touch("key", time.Minute); err != nil || !ok {
+		t.Fatalf("Touch() = (%t, %v), want (true, nil)", ok, err)
 	}
-	if l1.closeCount() != 1 || l2.closeCount() != 1 {
-		t.Fatalf("Close() counts = (%d, %d), want (1, 1)", l1.closeCount(), l2.closeCount())
+	if _, ttl, err := l2.Get("key"); err != nil || ttl != time.Minute {
+		t.Fatalf("L2 TTL after Touch() = %v, %v; want %v, nil", ttl, err, time.Minute)
+	}
+	if removed, err := cache.Forget("key"); err != nil || !removed {
+		t.Fatalf("Forget() = (%t, %v), want (true, nil)", removed, err)
+	}
+	if value, _, err := l1.Get("key"); err != nil || value != nil {
+		t.Fatalf("L1 after Forget() = (%q, %v), want (nil, nil)", value, err)
+	}
+	if value, _, err := l2.Get("key"); err != nil || value != nil {
+		t.Fatalf("L2 after Forget() = (%q, %v), want (nil, nil)", value, err)
 	}
 }
 
-func TestTieredCacheOperationsAfterCloseReturnErrClosed(t *testing.T) {
-	l1 := newFakeCache()
-	l2 := newFakeCache()
-	cache := newTestTieredCache(t, Config{}, l1, l2)
-
+func TestTieredCacheCloseOperationsReturnErrClosed(t *testing.T) {
+	cache := newTestTieredCache(t, Config{}, newFakeCache(), newFakeCache())
 	if err := cache.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	tests := []struct {
-		name string
-		call func() error
-	}{
-		{
-			name: "Get",
-			call: func() error {
-				_, _, err := cache.Get("key")
-				return err
-			},
-		},
-		{
-			name: "Set",
-			call: func() error {
-				_, err := cache.Set("key", []byte("value"), time.Minute)
-				return err
-			},
-		},
-		{
-			name: "Forever",
-			call: func() error {
-				_, err := cache.Forever("key", []byte("value"))
-				return err
-			},
-		},
-		{
-			name: "Forget",
-			call: func() error {
-				_, err := cache.Forget("key")
-				return err
-			},
-		},
-		{
-			name: "Touch",
-			call: func() error {
-				_, err := cache.Touch("key", time.Minute)
-				return err
-			},
-		},
-		{
-			name: "Flush",
-			call: func() error {
-				_, err := cache.Flush()
-				return err
-			},
-		},
+	if _, _, err := cache.Get("key"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Get() error = %v, want ErrClosed", err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if err := test.call(); !errors.Is(err, ErrClosed) {
-				t.Fatalf("error = %v, want ErrClosed", err)
-			}
-		})
+	if ok, err := cache.Set("key", []byte("value"), time.Minute); ok || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Set() = (%t, %v), want (false, ErrClosed)", ok, err)
 	}
-	if got := l1.getCount(); got != 0 {
-		t.Fatalf("L1 Get() calls after Close() = %d, want 0", got)
+	if ok, err := cache.Forever("key", []byte("value")); ok || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Forever() = (%t, %v), want (false, ErrClosed)", ok, err)
 	}
-	if got := l2.getCount(); got != 0 {
-		t.Fatalf("L2 Get() calls after Close() = %d, want 0", got)
+	if ok, err := cache.Forget("key"); ok || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Forget() = (%t, %v), want (false, ErrClosed)", ok, err)
+	}
+	if ok, err := cache.Touch("key", time.Minute); ok || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Touch() = (%t, %v), want (false, ErrClosed)", ok, err)
+	}
+	if ok, err := cache.Flush(); ok || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Flush() = (%t, %v), want (false, ErrClosed)", ok, err)
 	}
 }
 
-func TestTieredCacheCloseWaitsForActiveGet(t *testing.T) {
-	l1 := newFakeCache()
-	l2 := newFakeCache()
-	l1.values["key"] = []byte("value")
-	l1.ttls["key"] = time.Minute
-	getStarted := make(chan struct{})
-	releaseGet := make(chan struct{})
-	l1.getHook = func() {
-		close(getStarted)
-		<-releaseGet
+func TestTieredCacheRejectsInvalidConfigAndBackends(t *testing.T) {
+	if _, err := New(Config{RecoveryInterval: -time.Second}, newFakeCache(), newFakeCache()); err == nil {
+		t.Fatal("New() error = nil, want invalid recovery interval error")
 	}
-
-	cache := newTestTieredCache(t, Config{}, l1, l2)
-	getDone := make(chan struct {
-		value []byte
-		ttl   time.Duration
-		err   error
-	}, 1)
-	go func() {
-		value, ttl, err := cache.Get("key")
-		getDone <- struct {
-			value []byte
-			ttl   time.Duration
-			err   error
-		}{value: value, ttl: ttl, err: err}
-	}()
-
-	select {
-	case <-getStarted:
-	case <-time.After(time.Second):
-		t.Fatal("Get() did not reach L1")
+	if _, err := New(Config{}, nil, newFakeCache()); err == nil {
+		t.Fatal("New() error = nil, want nil L1 error")
 	}
-
-	closeDone := make(chan error, 1)
-	go func() {
-		closeDone <- cache.Close()
-	}()
-	select {
-	case err := <-closeDone:
-		t.Fatalf("Close() returned before active Get(): %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	close(releaseGet)
-	select {
-	case result := <-getDone:
-		if string(result.value) != "value" || result.ttl != time.Minute || result.err != nil {
-			t.Fatalf("Get() = (%q, %v, %v), want (value, %v, nil)", result.value, result.ttl, result.err, time.Minute)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Get() did not finish")
-	}
-	select {
-	case err := <-closeDone:
-		if err != nil {
-			t.Fatalf("Close() error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Close() did not finish after Get()")
-	}
-}
-
-func TestTieredCacheEnterHealthySerializesStateCleanup(t *testing.T) {
-	cache := &TieredCache{}
-	oldErr := errors.New("old L2 error")
-	oldFlushDone := make(chan struct{})
-	cache.healthState.Store(uint32(degraded))
-	cache.stateErr = oldErr
-	cache.degradedFlushDone = oldFlushDone
-
-	cache.stateErrMu.Lock()
-	started := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		close(started)
-		cache.enterHealthy()
-		close(done)
-	}()
-	<-started
-
-	for i := 0; i < 1000; i++ {
-		if healthState(cache.healthState.Load()) != degraded {
-			t.Fatal("enterHealthy changed health before acquiring stateErrMu")
-		}
-		runtime.Gosched()
-	}
-	cache.stateErrMu.Unlock()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("enterHealthy did not finish")
-	}
-	if healthState(cache.healthState.Load()) != healthy {
-		t.Fatal("health state = degraded, want healthy")
-	}
-	cache.stateErrMu.RLock()
-	degradedFlushDone := cache.degradedFlushDone
-	stateErr := cache.stateErr
-	cache.stateErrMu.RUnlock()
-	if stateErr != nil || degradedFlushDone != nil {
-		t.Fatalf("state after enterHealthy = (err %v, flush %v), want (nil, nil)", stateErr, degradedFlushDone)
+	if _, err := New(Config{}, newFakeCache(), nil); err == nil {
+		t.Fatal("New() error = nil, want nil L2 error")
 	}
 }
 
@@ -574,204 +302,64 @@ func newTestTieredCache(t *testing.T, config Config, l1, l2 *fakeCache) *TieredC
 	return cache
 }
 
+func waitForTieredCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition was not satisfied")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 type fakeCache struct {
 	mu sync.Mutex
 
 	values map[string][]byte
 	ttls   map[string]time.Duration
 
+	getErr    error
+	setErr    error
+	forgetErr error
+	touchErr  error
+	flushErr  error
+	closeErr  error
+
+	getStarted  chan struct{}
+	releaseGet  chan struct{}
+	setStarted  chan struct{}
+	releaseSet  chan struct{}
+	setHook     func()
 	getCalls    int
-	getHook     func()
-	getErr      error
-	setErr      error
-	forgetErr   error
-	touchErr    error
-	flushErr    error
+	setCalls    int
 	forgetCalls int
 	flushCalls  int
-	fenceTokens map[string]cachecontract.FenceToken
-	fenceSeq    uint64
-
-	setStarted chan struct{}
-	releaseSet chan struct{}
-
-	closeCalls int
+	closeCalls  int
 }
 
 func newFakeCache() *fakeCache {
 	return &fakeCache{
-		values:      make(map[string][]byte),
-		ttls:        make(map[string]time.Duration),
-		fenceTokens: make(map[string]cachecontract.FenceToken),
+		values: make(map[string][]byte),
+		ttls:   make(map[string]time.Duration),
 	}
+}
+
+func (f *fakeCache) put(key string, value []byte, ttl time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.values[key] = append([]byte(nil), value...)
+	f.ttls[key] = ttl
 }
 
 func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 	f.mu.Lock()
 	f.getCalls++
-	getErr := f.getErr
-	if getErr != nil {
-		f.mu.Unlock()
-		return nil, 0, getErr
-	}
-	value, ok := f.values[key]
-	if !ok {
-		f.mu.Unlock()
-		return nil, 0, nil
-	}
-	valueCopy := append([]byte(nil), value...)
+	err := f.getErr
+	value := append([]byte(nil), f.values[key]...)
 	ttl := f.ttls[key]
-	getHook := f.getHook
-	f.mu.Unlock()
-
-	if getHook != nil {
-		getHook()
-	}
-	return valueCopy, ttl, nil
-}
-
-func (f *fakeCache) Set(key string, keyValue []byte, ttl time.Duration) (bool, error) {
-	return f.set(key, keyValue, ttl, false)
-}
-
-func (f *fakeCache) Forever(key string, keyValue []byte) (bool, error) {
-	return f.set(key, keyValue, 0, true)
-}
-
-func (f *fakeCache) ReserveFence(key string) (cachecontract.FenceToken, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.fenceSeq++
-	token := cachecontract.FenceToken(strconv.FormatUint(f.fenceSeq, 10))
-	f.fenceTokens[key] = token
-	return token, nil
-}
-
-func (f *fakeCache) ReleaseFence(key string, token cachecontract.FenceToken) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.fenceTokens[key] != token {
-		return false, nil
-	}
-	delete(f.fenceTokens, key)
-	return true, nil
-}
-
-func (f *fakeCache) SetWithFence(key string, keyValue []byte, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
-	return f.setWithFence(key, keyValue, ttl, token, false)
-}
-
-func (f *fakeCache) ForeverWithFence(key string, keyValue []byte, token cachecontract.FenceToken) (bool, error) {
-	return f.setWithFence(key, keyValue, 0, token, true)
-}
-
-func (f *fakeCache) setWithFence(key string, keyValue []byte, ttl time.Duration, token cachecontract.FenceToken, forever bool) (bool, error) {
-	f.mu.Lock()
-	currentToken := f.fenceTokens[key]
-	setErr := f.setErr
-	started := f.setStarted
-	release := f.releaseSet
-	f.mu.Unlock()
-
-	if setErr != nil {
-		return false, setErr
-	}
-	if started != nil {
-		select {
-		case started <- struct{}{}:
-		default:
-		}
-	}
-	if release != nil {
-		<-release
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if currentToken != token || f.fenceTokens[key] != token {
-		return false, nil
-	}
-	f.values[key] = append([]byte(nil), keyValue...)
-	if forever {
-		f.ttls[key] = 0
-	} else {
-		f.ttls[key] = ttl
-	}
-	delete(f.fenceTokens, key)
-	return true, nil
-}
-
-func (f *fakeCache) ForgetWithFence(key string) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.fenceSeq++
-	f.fenceTokens[key] = cachecontract.FenceToken(strconv.FormatUint(f.fenceSeq, 10))
-	f.forgetCalls++
-	if f.forgetErr != nil {
-		return false, f.forgetErr
-	}
-	delete(f.fenceTokens, key)
-	if _, ok := f.values[key]; !ok {
-		return false, nil
-	}
-	delete(f.values, key)
-	delete(f.ttls, key)
-	return true, nil
-}
-
-func (f *fakeCache) ForgetIfFence(key string, token cachecontract.FenceToken) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.fenceTokens[key] != token {
-		return false, nil
-	}
-	if f.forgetErr != nil {
-		return false, f.forgetErr
-	}
-	delete(f.fenceTokens, key)
-	if _, ok := f.values[key]; !ok {
-		return false, nil
-	}
-	delete(f.values, key)
-	delete(f.ttls, key)
-	return true, nil
-}
-
-func (f *fakeCache) TouchWithFence(key string, ttl time.Duration, token cachecontract.FenceToken) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.touchErr != nil {
-		return false, f.touchErr
-	}
-	if f.fenceTokens[key] != token {
-		return false, nil
-	}
-	if _, ok := f.values[key]; !ok {
-		delete(f.fenceTokens, key)
-		return false, nil
-	}
-	f.ttls[key] = ttl
-	delete(f.fenceTokens, key)
-	return true, nil
-}
-
-func (f *fakeCache) setErrors(getErr, setErr error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.getErr = getErr
-	f.setErr = setErr
-}
-
-func (f *fakeCache) set(key string, keyValue []byte, ttl time.Duration, forever bool) (bool, error) {
-	f.mu.Lock()
-	err := f.setErr
-	started := f.setStarted
-	release := f.releaseSet
+	started := f.getStarted
+	release := f.releaseGet
 	f.mu.Unlock()
 
 	if started != nil {
@@ -784,33 +372,59 @@ func (f *fakeCache) set(key string, keyValue []byte, ttl time.Duration, forever 
 		<-release
 	}
 	if err != nil {
+		return nil, 0, err
+	}
+	if value == nil {
+		return nil, 0, nil
+	}
+	return value, ttl, nil
+}
+
+func (f *fakeCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	f.setCalls++
+	err := f.setErr
+	started := f.setStarted
+	release := f.releaseSet
+	hook := f.setHook
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook()
+	}
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	if err != nil {
 		return false, err
 	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.values[key] = append([]byte(nil), keyValue...)
-	if forever {
-		f.ttls[key] = 0
-	} else {
-		f.ttls[key] = ttl
-	}
+	f.put(key, value, ttl)
 	return true, nil
+}
+
+func (f *fakeCache) Forever(key string, value []byte) (bool, error) {
+	return f.Set(key, value, 0)
 }
 
 func (f *fakeCache) Forget(key string) (bool, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.forgetCalls++
-	if f.forgetErr != nil {
-		return false, f.forgetErr
+	err := f.forgetErr
+	if err != nil {
+		f.mu.Unlock()
+		return false, err
 	}
-	if _, ok := f.values[key]; !ok {
-		return false, nil
-	}
+	_, exists := f.values[key]
 	delete(f.values, key)
 	delete(f.ttls, key)
-	return true, nil
+	f.mu.Unlock()
+	return exists, nil
 }
 
 func (f *fakeCache) Touch(key string, ttl time.Duration) (bool, error) {
@@ -819,7 +433,7 @@ func (f *fakeCache) Touch(key string, ttl time.Duration) (bool, error) {
 	if f.touchErr != nil {
 		return false, f.touchErr
 	}
-	if _, ok := f.values[key]; !ok {
+	if _, exists := f.values[key]; !exists {
 		return false, nil
 	}
 	f.ttls[key] = ttl
@@ -828,22 +442,22 @@ func (f *fakeCache) Touch(key string, ttl time.Duration) (bool, error) {
 
 func (f *fakeCache) Flush() (bool, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.flushCalls++
+	defer f.mu.Unlock()
 	if f.flushErr != nil {
 		return false, f.flushErr
 	}
 	f.values = make(map[string][]byte)
 	f.ttls = make(map[string]time.Duration)
-	f.fenceTokens = make(map[string]cachecontract.FenceToken)
 	return true, nil
 }
 
 func (f *fakeCache) Close() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.closeCalls++
-	return nil
+	err := f.closeErr
+	f.mu.Unlock()
+	return err
 }
 
 func (f *fakeCache) getCount() int {
@@ -852,34 +466,10 @@ func (f *fakeCache) getCount() int {
 	return f.getCalls
 }
 
-func (f *fakeCache) closeCount() int {
+func (f *fakeCache) setCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.closeCalls
-}
-
-func (f *fakeCache) setForgetError(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.forgetErr = err
-}
-
-func (f *fakeCache) setTouchError(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.touchErr = err
-}
-
-func (f *fakeCache) setFlushError(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.flushErr = err
-}
-
-func (f *fakeCache) forgetCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.forgetCalls
+	return f.setCalls
 }
 
 func (f *fakeCache) flushCount() int {

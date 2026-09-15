@@ -14,22 +14,6 @@ import (
 	cacheinvalidation "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/invalidation"
 )
 
-type writeOperation struct {
-	key             string
-	value           []byte
-	ttl             time.Duration
-	expiresAt       time.Time
-	forever         bool
-	fenceToken      cachecontract.FenceToken
-	keyGeneration   uint64
-	flushGeneration uint64
-}
-
-type keyGenerationState struct {
-	generation uint64
-	pending    int
-}
-
 const recoveryProbeKey = "\x00frankenphp-tiered-cache/recovery-probe"
 
 const invalidationOriginSize = 16
@@ -50,169 +34,46 @@ const (
 	degraded
 )
 
-type writeQueue struct {
-	mu       sync.Mutex
-	notEmpty *sync.Cond
-	notFull  *sync.Cond
-	empty    *sync.Cond
+var errL1MutationNotStored = errors.New("tiered cache: L1 mutation was not stored")
 
-	items []writeOperation
-	head  int
-	tail  int
-	size  int
-
-	pendingBytes int64
-	pending      int
-	maxBytes     int64
-	closed       bool
-}
-
-func newWriteQueue(capacity int, maxBytes int64) *writeQueue {
-	queue := &writeQueue{
-		items:    make([]writeOperation, capacity),
-		maxBytes: maxBytes,
-	}
-	queue.notEmpty = sync.NewCond(&queue.mu)
-	queue.notFull = sync.NewCond(&queue.mu)
-	queue.empty = sync.NewCond(&queue.mu)
-	return queue
-}
-
-func (q *writeQueue) enqueue(operation writeOperation, timeout time.Duration) error {
-	operationBytes := int64(len(operation.value))
-	if operationBytes > q.maxBytes {
-		return ErrWriteQueueValueTooLarge
-	}
-
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if q.closed {
-		return ErrClosed
-	}
-
-	deadline := time.Now().Add(timeout)
-	for q.pending == len(q.items) || q.pendingBytes+operationBytes > q.maxBytes {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return ErrWriteQueueTimeout
-		}
-
-		timer := time.AfterFunc(remaining, func() {
-			q.mu.Lock()
-			q.notFull.Broadcast()
-			q.mu.Unlock()
-		})
-		q.notFull.Wait()
-		timer.Stop()
-
-		if q.closed {
-			return ErrClosed
-		}
-	}
-
-	q.items[q.tail] = operation
-	q.tail = (q.tail + 1) % len(q.items)
-	q.size++
-	q.pending++
-	q.pendingBytes += operationBytes
-	q.notEmpty.Signal()
-	return nil
-}
-
-func (q *writeQueue) dequeue() (writeOperation, bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	for q.size == 0 && !q.closed {
-		q.notEmpty.Wait()
-	}
-	if q.size == 0 {
-		return writeOperation{}, false
-	}
-
-	operation := q.items[q.head]
-	q.items[q.head] = writeOperation{}
-	q.head = (q.head + 1) % len(q.items)
-	q.size--
-	return operation, true
-}
-
-func (q *writeQueue) complete(operation writeOperation) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	q.pending--
-	q.pendingBytes -= int64(len(operation.value))
-	q.notFull.Broadcast()
-	if q.pending == 0 {
-		q.empty.Broadcast()
-	}
-}
-
-func (q *writeQueue) waitEmpty() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	for q.pending > 0 {
-		q.empty.Wait()
-	}
-}
-
-func (q *writeQueue) close() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	q.closed = true
-	q.notEmpty.Broadcast()
-	q.notFull.Broadcast()
-	q.empty.Broadcast()
-}
-
-// TieredCache composes an L1 cache with an L2 cache.
-//
-// L2 writes from Set and Forever are processed by one FIFO worker. The worker
-// keeps operation ordering deterministic; synchronous invalidation operations
-// wait for all earlier queued writes before touching either backend. When an
-// L2 key mutation fails, its key remains dirty until recovery removes it.
+// TieredCache uses Redis as the authoritative store and MemoryCache as a
+// local read-through cache. Mutations change Redis first, then update L1 and
+// invalidate peers before returning.
 type TieredCache struct {
-	l1       cachecontract.Cache
-	l2       cachecontract.Cache
-	fencedL2 cachecontract.FencedCache
+	l1 cachecontract.Cache
+	l2 cachecontract.Cache
 
-	queue                 *writeQueue
-	pending               *pendingWrites
-	workerDone            chan struct{}
-	writeQueueWaitTimeout time.Duration
-	recoveryInterval      time.Duration
-	onWriteError          func(key string, err error)
-	now                   func() time.Time
+	recoveryInterval time.Duration
 
-	healthState        atomic.Uint32
-	stateErrMu         sync.RWMutex
-	stateErr           error
-	degradedFlushDone  chan struct{}
-	recoveryWake       chan struct{}
-	recoveryStop       chan struct{}
-	recoveryDone       chan struct{}
-	dirtyMu            sync.Mutex
-	dirtyKeys          map[string]cachecontract.FenceToken
-	pendingFlushMu     sync.Mutex
-	pendingFlush       bool
-	mutationMu         sync.Mutex
-	lifecycleMu        sync.RWMutex
-	mutationVersion    atomic.Uint64
-	flushGeneration    atomic.Uint64
-	generationMu       sync.Mutex
-	keyGenerations     map[string]keyGenerationState
+	healthState atomic.Uint32
+	stateErrMu  sync.RWMutex
+	stateErr    error
+	healthEpoch uint64
+
+	recoveryWake chan struct{}
+	recoveryStop chan struct{}
+	recoveryDone chan struct{}
+	recoveryMu   sync.Mutex
+
+	// Pending entries contain only Pub/Sub messages that must be retried.
+	// They never represent Redis data and recovery never deletes cache keys.
+	pendingMu            sync.Mutex
+	pendingInvalidations map[string]struct{}
+	pendingFlush         bool
+
+	mutationMu      sync.Mutex
+	mutationVersion atomic.Uint64
+
 	invalidationBus    cacheinvalidation.Bus
 	invalidationOrigin string
 	invalidationReady  atomic.Bool
 	invalidationCancel context.CancelFunc
 	invalidationDone   chan struct{}
-	closeOnce          sync.Once
-	closeErr           error
-	closed             bool
+
+	lifecycleMu sync.RWMutex
+	closeOnce   sync.Once
+	closeErr    error
+	closed      bool
 }
 
 var _ cachecontract.Cache = (*TieredCache)(nil)
@@ -222,9 +83,7 @@ func New(config Config, l1, l2 cachecontract.Cache) (*TieredCache, error) {
 }
 
 // NewWithInvalidation composes L1 and L2 with a cross-instance invalidation
-// bus. The L2 backend must support fencing so delayed writes cannot recreate a
-// value after another instance has forgotten the key. Received events are
-// applied to this cache's L1 only.
+// bus. Events contain no values; receivers only forget their local L1 entry.
 func NewWithInvalidation(config Config, l1, l2 cachecontract.Cache, bus cacheinvalidation.Bus) (*TieredCache, error) {
 	return newTieredCache(config, l1, l2, bus)
 }
@@ -242,55 +101,37 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		return nil, err
 	}
 
-	var fencedL2 cachecontract.FencedCache
+	var origin string
 	if bus != nil {
-		var ok bool
-		fencedL2, ok = l2.(cachecontract.FencedCache)
-		if !ok {
-			return nil, fmt.Errorf("tiered cache: L2 cache must support fencing when invalidation is enabled")
-		}
-	}
-
-	var invalidationOrigin string
-	if bus != nil {
-		invalidationOrigin, err = newInvalidationOrigin()
+		origin, err = newInvalidationOrigin()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	cache := &TieredCache{
-		l1:                    l1,
-		l2:                    l2,
-		fencedL2:              fencedL2,
-		queue:                 newWriteQueue(config.WriteQueueCapacity, config.WriteQueueMaxBytes),
-		pending:               newPendingWrites(),
-		workerDone:            make(chan struct{}),
-		writeQueueWaitTimeout: config.WriteQueueWaitTimeout,
-		recoveryInterval:      config.RecoveryInterval,
-		onWriteError:          config.OnWriteError,
-		now:                   time.Now,
-		recoveryWake:          make(chan struct{}, 1),
-		recoveryStop:          make(chan struct{}),
-		recoveryDone:          make(chan struct{}),
-		dirtyKeys:             make(map[string]cachecontract.FenceToken),
-		keyGenerations:        make(map[string]keyGenerationState),
-		invalidationBus:       bus,
-		invalidationOrigin:    invalidationOrigin,
-		invalidationDone:      make(chan struct{}),
+	c := &TieredCache{
+		l1:                   l1,
+		l2:                   l2,
+		recoveryInterval:     config.RecoveryInterval,
+		recoveryWake:         make(chan struct{}, 1),
+		recoveryStop:         make(chan struct{}),
+		recoveryDone:         make(chan struct{}),
+		pendingInvalidations: make(map[string]struct{}),
+		invalidationBus:      bus,
+		invalidationOrigin:   origin,
+		invalidationDone:     make(chan struct{}),
 	}
 	if bus == nil {
-		cache.invalidationReady.Store(true)
-		close(cache.invalidationDone)
+		c.invalidationReady.Store(true)
+		close(c.invalidationDone)
 	} else {
-		invalidationContext, cancel := context.WithCancel(context.Background())
-		cache.invalidationCancel = cancel
-		go cache.runInvalidationSubscriber(invalidationContext)
+		ctx, cancel := context.WithCancel(context.Background())
+		c.invalidationCancel = cancel
+		go c.runInvalidationSubscriber(ctx)
 	}
-	go cache.runWriter()
-	go cache.runRecovery()
+	go c.runRecovery()
 
-	return cache, nil
+	return c, nil
 }
 
 func (c *TieredCache) unavailableError() error {
@@ -308,43 +149,49 @@ func (c *TieredCache) unavailableError() error {
 	return fmt.Errorf("%w: %w", ErrL2Unavailable, err)
 }
 
-func (c *TieredCache) degradeAndFlush(cause error) {
-	newlyDegraded, flushDone := c.transitionToDegraded(cause)
-	if !newlyDegraded {
-		return
-	}
-
-	c.mutationMu.Lock()
-	c.flushL1Locked(flushDone)
-	c.mutationMu.Unlock()
-}
-
-func (c *TieredCache) transitionToDegraded(cause error) (bool, chan struct{}) {
+func (c *TieredCache) transitionToDegraded(cause error) (bool, uint64) {
 	if cause == nil {
 		cause = ErrL2Unavailable
 	}
 
 	c.stateErrMu.Lock()
-	if !c.healthState.CompareAndSwap(uint32(healthy), uint32(degraded)) {
-		c.stateErrMu.Unlock()
-		return false, nil
+	defer c.stateErrMu.Unlock()
+
+	if healthState(c.healthState.Load()) == degraded {
+		return false, c.healthEpoch
 	}
 
-	flushDone := make(chan struct{})
+	c.healthState.Store(uint32(degraded))
+	c.healthEpoch++
 	c.stateErr = cause
-	c.degradedFlushDone = flushDone
-	c.stateErrMu.Unlock()
 
 	select {
 	case c.recoveryWake <- struct{}{}:
 	default:
 	}
-	return true, flushDone
+	return true, c.healthEpoch
 }
 
-func (c *TieredCache) flushL1Locked(flushDone chan struct{}) {
-	defer close(flushDone)
+// degradeLocked is called while mutationMu is held. That ordering prevents a
+// local mutation and an optional fail-closed L1 flush from interleaving.
+func (c *TieredCache) degradeLocked(cause error, flushL1 bool) {
+	_, _ = c.transitionToDegraded(cause)
+	if flushL1 {
+		c.flushL1Locked()
+	}
+}
 
+func (c *TieredCache) degradeAndFlush(cause error) {
+	_, _ = c.transitionToDegraded(cause)
+
+	c.recoveryMu.Lock()
+	defer c.recoveryMu.Unlock()
+	c.mutationMu.Lock()
+	c.flushL1Locked()
+	c.mutationMu.Unlock()
+}
+
+func (c *TieredCache) flushL1Locked() {
 	if c.closed {
 		return
 	}
@@ -357,100 +204,20 @@ func (c *TieredCache) flushL1Locked(flushDone chan struct{}) {
 	}
 }
 
-func (c *TieredCache) enterHealthy() {
+func (c *TieredCache) enterHealthy(expectedEpoch uint64) bool {
 	c.stateErrMu.Lock()
 	defer c.stateErrMu.Unlock()
 
-	if !c.healthState.CompareAndSwap(uint32(degraded), uint32(healthy)) {
-		return
+	if healthState(c.healthState.Load()) != degraded || c.healthEpoch != expectedEpoch {
+		return false
+	}
+	if c.invalidationBus != nil && !c.invalidationReady.Load() {
+		return false
 	}
 
+	c.healthState.Store(uint32(healthy))
 	c.stateErr = nil
-	c.degradedFlushDone = nil
-}
-
-func (c *TieredCache) waitForL1Flush() {
-	c.stateErrMu.RLock()
-	flushDone := c.degradedFlushDone
-	c.stateErrMu.RUnlock()
-	if flushDone != nil {
-		<-flushDone
-	}
-}
-
-func (c *TieredCache) markDirtyWithFence(key string, token cachecontract.FenceToken) {
-	// A key is retained only until the next successful recovery cleanup.
-	// An empty token is valid only for a TieredCache without fenced L2.
-	c.dirtyMu.Lock()
-	c.dirtyKeys[key] = token
-	c.dirtyMu.Unlock()
-}
-
-func (c *TieredCache) releaseFence(key string, token cachecontract.FenceToken) error {
-	if c.fencedL2 == nil || token == "" {
-		return nil
-	}
-
-	_, err := c.fencedL2.ReleaseFence(key, token)
-	return err
-}
-
-// beginWriteGeneration registers an async write before it enters the queue.
-// The pending count keeps a generation entry alive while a worker may still
-// compare against it, without retaining every key invalidated over the cache
-// lifetime.
-func (c *TieredCache) beginWriteGeneration(key string) uint64 {
-	c.generationMu.Lock()
-	defer c.generationMu.Unlock()
-
-	state := c.keyGenerations[key]
-	state.pending++
-	c.keyGenerations[key] = state
-	return state.generation
-}
-
-func (c *TieredCache) endWriteGeneration(key string) {
-	c.generationMu.Lock()
-	defer c.generationMu.Unlock()
-
-	state, ok := c.keyGenerations[key]
-	if !ok {
-		return
-	}
-	state.pending--
-	if state.pending <= 0 {
-		delete(c.keyGenerations, key)
-		return
-	}
-	c.keyGenerations[key] = state
-}
-
-func (c *TieredCache) bumpKeyGeneration(key string) {
-	c.generationMu.Lock()
-	defer c.generationMu.Unlock()
-
-	state, ok := c.keyGenerations[key]
-	if !ok {
-		// There is no in-flight write to invalidate. Avoid retaining a
-		// tombstone for a key that may never be used again.
-		return
-	}
-	state.generation++
-	c.keyGenerations[key] = state
-}
-
-func (c *TieredCache) keyGeneration(key string) uint64 {
-	c.generationMu.Lock()
-	defer c.generationMu.Unlock()
-
-	return c.keyGenerations[key].generation
-}
-
-func (c *TieredCache) writeOperationStale(operation writeOperation) bool {
-	if c.flushGeneration.Load() != operation.flushGeneration {
-		return true
-	}
-	return c.keyGeneration(operation.key) != operation.keyGeneration
+	return true
 }
 
 func (c *TieredCache) publishKeyInvalidation(key string) error {
@@ -478,151 +245,112 @@ func (c *TieredCache) publishFlushInvalidation() error {
 	})
 }
 
-func (c *TieredCache) markPendingFlush() {
-	c.pendingFlushMu.Lock()
-	c.pendingFlush = true
-	c.pendingFlushMu.Unlock()
+func (c *TieredCache) markPendingInvalidation(key string) {
+	if c.invalidationBus == nil {
+		return
+	}
+
+	c.pendingMu.Lock()
+	if !c.pendingFlush {
+		c.pendingInvalidations[key] = struct{}{}
+	}
+	c.pendingMu.Unlock()
 }
 
-func (c *TieredCache) recoverPendingFlush() bool {
+func (c *TieredCache) markPendingFlush() {
+	if c.invalidationBus == nil {
+		return
+	}
+
+	c.pendingMu.Lock()
+	c.pendingFlush = true
+	clear(c.pendingInvalidations)
+	c.pendingMu.Unlock()
+}
+
+func (c *TieredCache) recoverPendingInvalidations() bool {
 	if c.invalidationBus == nil {
 		return true
 	}
 
-	c.pendingFlushMu.Lock()
-	defer c.pendingFlushMu.Unlock()
-	if !c.pendingFlush {
-		return true
-	}
-	if err := c.publishFlushInvalidation(); err != nil {
-		return false
-	}
-	c.pendingFlush = false
-	return true
-}
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
 
-func (c *TieredCache) recoverDirtyKeys() bool {
-	c.dirtyMu.Lock()
-	defer c.dirtyMu.Unlock()
-
-	for key, token := range c.dirtyKeys {
-		var err error
-		if c.fencedL2 != nil {
-			if token == "" {
-				// Never fall back to an unconditional delete in fenced mode:
-				// another pod may have completed a newer mutation already.
-				return false
-			}
-			_, err = c.fencedL2.ForgetIfFence(key, token)
-		} else {
-			_, err = c.l2.Forget(key)
-		}
-		if err != nil {
+	if c.pendingFlush {
+		if err := c.publishFlushInvalidation(); err != nil {
 			return false
 		}
+		c.pendingFlush = false
+		return true
+	}
+
+	for key := range c.pendingInvalidations {
 		if err := c.publishKeyInvalidation(key); err != nil {
 			return false
 		}
-		delete(c.dirtyKeys, key)
+		delete(c.pendingInvalidations, key)
 	}
 	return true
+}
+
+func (c *TieredCache) tryRecovery() {
+	if healthState(c.healthState.Load()) != degraded {
+		return
+	}
+	if c.invalidationBus != nil && !c.invalidationReady.Load() {
+		return
+	}
+
+	if _, _, err := c.l2.Get(recoveryProbeKey); err != nil {
+		return
+	}
+	if !c.recoverPendingInvalidations() {
+		return
+	}
+
+	c.recoveryMu.Lock()
+	defer c.recoveryMu.Unlock()
+	if healthState(c.healthState.Load()) != degraded {
+		return
+	}
+	if c.invalidationBus != nil && !c.invalidationReady.Load() {
+		return
+	}
+	c.stateErrMu.RLock()
+	expectedEpoch := c.healthEpoch
+	c.stateErrMu.RUnlock()
+
+	// A Redis outage may have happened before a local L1 mutation was
+	// attempted. Keep that mutation untouched while degraded, then clear L1
+	// immediately before making the cache healthy again.
+	c.mutationMu.Lock()
+	if c.closed {
+		c.mutationMu.Unlock()
+		return
+	}
+	_, flushErr := c.l1.Flush()
+	c.mutationMu.Unlock()
+	if flushErr != nil {
+		return
+	}
+	c.enterHealthy(expectedEpoch)
 }
 
 func (c *TieredCache) runRecovery() {
 	defer close(c.recoveryDone)
 
+	ticker := time.NewTicker(c.recoveryInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
+		case <-ticker.C:
+			c.tryRecovery()
 		case <-c.recoveryWake:
+			// The ticker defines the recovery cadence. The wake-up channel
+			// prevents a future implementation from sleeping forever while
+			// degraded, but an error must not be retried immediately.
 		case <-c.recoveryStop:
-			return
-		}
-
-		ticker := time.NewTicker(c.recoveryInterval)
-		for healthState(c.healthState.Load()) == degraded {
-			select {
-			case <-ticker.C:
-				c.queue.waitEmpty()
-				if healthState(c.healthState.Load()) != degraded {
-					continue
-				}
-				c.waitForL1Flush()
-				if healthState(c.healthState.Load()) != degraded {
-					continue
-				}
-				if c.invalidationBus != nil && !c.invalidationReady.Load() {
-					continue
-				}
-
-				if _, _, err := c.l2.Get(recoveryProbeKey); err == nil && c.recoverPendingFlush() && c.recoverDirtyKeys() {
-					c.enterHealthy()
-				}
-			case <-c.recoveryStop:
-				ticker.Stop()
-				return
-			}
-		}
-		ticker.Stop()
-	}
-}
-
-func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
-	defer close(c.invalidationDone)
-
-	firstSubscription := true
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		subscription, err := c.invalidationBus.Subscribe(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			c.invalidationReady.Store(false)
-			c.degradeAndFlush(err)
-			if !waitForRetry(ctx, c.recoveryInterval) {
-				return
-			}
-			continue
-		}
-
-		if !firstSubscription {
-			c.invalidationReady.Store(false)
-			if err := c.flushLocalL1(); err != nil {
-				_ = subscription.Close()
-				c.degradeAndFlush(err)
-				if !waitForRetry(ctx, c.recoveryInterval) {
-					return
-				}
-				continue
-			}
-		}
-		firstSubscription = false
-		c.invalidationReady.Store(true)
-
-		for {
-			event, receiveErr := subscription.Receive(ctx)
-			if receiveErr != nil {
-				_ = subscription.Close()
-				if ctx.Err() != nil {
-					return
-				}
-				c.invalidationReady.Store(false)
-				c.degradeAndFlush(receiveErr)
-				break
-			}
-
-			if event.Origin == c.invalidationOrigin {
-				continue
-			}
-			if err := c.applyInvalidation(event); err != nil {
-				c.degradeAndFlush(err)
-			}
-		}
-
-		if !waitForRetry(ctx, c.recoveryInterval) {
 			return
 		}
 	}
@@ -640,13 +368,85 @@ func waitForRetry(ctx context.Context, interval time.Duration) bool {
 	}
 }
 
+func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
+	defer close(c.invalidationDone)
+
+	for {
+		if ctx.Err() != nil || c.isClosed() {
+			return
+		}
+		c.invalidationReady.Store(false)
+
+		subscription, err := c.invalidationBus.Subscribe(ctx)
+		if err != nil {
+			if ctx.Err() != nil || c.isClosed() {
+				return
+			}
+			c.degradeAndFlush(err)
+			if !waitForRetry(ctx, c.recoveryInterval) {
+				return
+			}
+			continue
+		}
+
+		if err := c.flushLocalL1(); err != nil {
+			_ = subscription.Close()
+			if ctx.Err() != nil || c.isClosed() {
+				return
+			}
+			c.degradeAndFlush(err)
+			if !waitForRetry(ctx, c.recoveryInterval) {
+				return
+			}
+			continue
+		}
+		c.invalidationReady.Store(true)
+
+		for {
+			event, receiveErr := subscription.Receive(ctx)
+			if receiveErr != nil {
+				_ = subscription.Close()
+				c.invalidationReady.Store(false)
+				if ctx.Err() != nil || c.isClosed() {
+					return
+				}
+				c.degradeAndFlush(receiveErr)
+				break
+			}
+
+			if err := c.applyInvalidation(event); err != nil {
+				_ = subscription.Close()
+				c.invalidationReady.Store(false)
+				if ctx.Err() != nil || c.isClosed() {
+					return
+				}
+				c.degradeAndFlush(err)
+				break
+			}
+		}
+
+		if !waitForRetry(ctx, c.recoveryInterval) {
+			return
+		}
+	}
+}
+
+func (c *TieredCache) isClosed() bool {
+	c.mutationMu.Lock()
+	closed := c.closed
+	c.mutationMu.Unlock()
+	return closed
+}
+
 func (c *TieredCache) flushLocalL1() error {
+	c.recoveryMu.Lock()
+	defer c.recoveryMu.Unlock()
 	c.mutationMu.Lock()
 	defer c.mutationMu.Unlock()
-	if c.closed {
-		return nil
-	}
 
+	if c.closed {
+		return ErrClosed
+	}
 	c.mutationVersion.Add(1)
 	_, err := c.l1.Flush()
 	return err
@@ -656,115 +456,103 @@ func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
 	if err := event.Validate(); err != nil {
 		return err
 	}
+	if event.Origin == c.invalidationOrigin {
+		return nil
+	}
 
 	c.mutationMu.Lock()
 	defer c.mutationMu.Unlock()
 	if c.closed {
-		return nil
+		return ErrClosed
 	}
 
 	c.mutationVersion.Add(1)
-	switch event.Type {
-	case cacheinvalidation.EventTypeInvalidate:
-		c.bumpKeyGeneration(event.Key)
-		_, err := c.l1.Forget(event.Key)
-		return err
-	case cacheinvalidation.EventTypeFlush:
-		c.flushGeneration.Add(1)
+	if event.Type == cacheinvalidation.EventTypeFlush {
 		_, err := c.l1.Flush()
 		return err
-	default:
-		return event.Validate()
 	}
+	_, err := c.l1.Forget(event.Key)
+	return err
 }
 
 func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 	c.lifecycleMu.RLock()
 	defer c.lifecycleMu.RUnlock()
 
-	c.mutationMu.Lock()
-	if c.closed {
-		c.mutationMu.Unlock()
-		return nil, 0, ErrClosed
-	}
-	c.mutationMu.Unlock()
-
 	for {
+		c.mutationMu.Lock()
+		if c.closed {
+			c.mutationMu.Unlock()
+			return nil, 0, ErrClosed
+		}
 		if err := c.unavailableError(); err != nil {
+			c.mutationMu.Unlock()
 			return nil, 0, err
 		}
+		c.mutationMu.Unlock()
 
 		value, ttl, err := c.l1.Get(key)
-		if err != nil || value != nil {
-			if unavailable := c.unavailableError(); unavailable != nil {
-				return nil, 0, unavailable
+		if err != nil {
+			return nil, 0, err
+		}
+		if value != nil {
+			c.mutationMu.Lock()
+			if c.closed {
+				c.mutationMu.Unlock()
+				return nil, 0, ErrClosed
 			}
-			return value, ttl, err
+			if err := c.unavailableError(); err != nil {
+				c.mutationMu.Unlock()
+				return nil, 0, err
+			}
+			c.mutationMu.Unlock()
+			return value, ttl, nil
 		}
 
 		version := c.mutationVersion.Load()
-		_ = c.pending.wait(key)
-		if unavailable := c.unavailableError(); unavailable != nil {
-			return nil, 0, unavailable
-		}
-		if c.mutationVersion.Load() != version {
-			continue
-		}
-
-		value, ttl, l2Err := c.l2.Get(key)
+		l2Value, l2TTL, l2Err := c.l2.Get(key)
 
 		c.mutationMu.Lock()
-		if c.mutationVersion.Load() != version {
+		if c.closed {
+			c.mutationMu.Unlock()
+			return nil, 0, ErrClosed
+		}
+		if version != c.mutationVersion.Load() {
 			c.mutationMu.Unlock()
 			continue
 		}
-
-		if unavailable := c.unavailableError(); unavailable != nil {
+		if err := c.unavailableError(); err != nil {
 			c.mutationMu.Unlock()
-			return nil, 0, unavailable
+			return nil, 0, err
+		}
+		if l2Err != nil {
+			c.degradeLocked(l2Err, true)
+			err := c.unavailableError()
+			c.mutationMu.Unlock()
+			return nil, 0, err
 		}
 
-		pending, _ := c.pending.status(key)
-		if pending {
-			c.mutationMu.Unlock()
-			_ = c.pending.wait(key)
-			if unavailable := c.unavailableError(); unavailable != nil {
-				return nil, 0, unavailable
-			}
-			continue
-		}
-
-		currentValue, currentTTL, currentErr := c.l1.Get(key)
+		current, currentTTL, currentErr := c.l1.Get(key)
 		if currentErr != nil {
 			c.mutationMu.Unlock()
 			return nil, 0, currentErr
 		}
-		if currentValue != nil {
+		if current != nil {
 			c.mutationMu.Unlock()
-			return currentValue, currentTTL, nil
+			return current, currentTTL, nil
 		}
-
-		if l2Err != nil {
-			newlyDegraded, flushDone := c.transitionToDegraded(l2Err)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return nil, 0, c.unavailableError()
-		}
-		if value == nil {
+		if l2Value == nil {
 			c.mutationMu.Unlock()
 			return nil, 0, nil
 		}
 
-		if ttl > 0 {
-			_, _ = c.l1.Set(key, value, ttl)
+		if l2TTL > 0 {
+			_, _ = c.l1.Set(key, l2Value, l2TTL)
 		} else {
-			_, _ = c.l1.Forever(key, value)
+			_, _ = c.l1.Forever(key, l2Value)
 		}
 		c.mutationMu.Unlock()
-
-		return value, ttl, nil
+		return l2Value, l2TTL, nil
 	}
 }
 
@@ -775,95 +563,99 @@ func (c *TieredCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 	if value == nil {
 		return false, cachecontract.ErrNilValue
 	}
-
-	return c.enqueueWrite(writeOperation{
-		key:       key,
-		value:     value,
-		ttl:       ttl,
-		expiresAt: c.now().Add(ttl),
-	})
+	return c.set(key, value, ttl, false)
 }
 
 func (c *TieredCache) Forever(key string, value []byte) (bool, error) {
 	if value == nil {
 		return false, cachecontract.ErrNilValue
 	}
+	return c.set(key, value, 0, true)
+}
 
-	return c.enqueueWrite(writeOperation{key: key, value: value, forever: true})
+func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever bool) (bool, error) {
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
+	if c.closed {
+		return false, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		return false, err
+	}
+
+	var stored bool
+	var l2Err error
+	if forever {
+		stored, l2Err = c.l2.Forever(key, value)
+	} else {
+		stored, l2Err = c.l2.Set(key, value, ttl)
+	}
+	if l2Err != nil {
+		c.degradeLocked(l2Err, false)
+		return false, c.unavailableError()
+	}
+	if !stored {
+		return false, nil
+	}
+
+	// Redis has committed. From this point on, errors must not make callers
+	// believe that the Redis mutation can safely be repeated as a fallback.
+	c.mutationVersion.Add(1)
+	var l1Stored bool
+	var l1Err error
+	if forever {
+		l1Stored, l1Err = c.l1.Forever(key, value)
+	} else {
+		l1Stored, l1Err = c.l1.Set(key, value, ttl)
+	}
+	if l1Err == nil && !l1Stored {
+		l1Err = errL1MutationNotStored
+	}
+	if l1Err != nil {
+		_, flushErr := c.l1.Flush()
+		l1Err = errors.Join(l1Err, flushErr)
+	}
+
+	publishErr := c.publishKeyInvalidation(key)
+	if publishErr != nil {
+		c.markPendingInvalidation(key)
+		c.degradeLocked(publishErr, true)
+	}
+	if l1Err != nil || publishErr != nil {
+		return true, errors.Join(l1Err, c.unavailableError())
+	}
+	return true, nil
 }
 
 func (c *TieredCache) Forget(key string) (bool, error) {
 	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
 	if c.closed {
-		c.mutationMu.Unlock()
 		return false, ErrClosed
 	}
 	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
 		return false, err
+	}
+
+	l2Removed, l2Err := c.l2.Forget(key)
+	if l2Err != nil {
+		c.degradeLocked(l2Err, false)
+		return false, c.unavailableError()
 	}
 	c.mutationVersion.Add(1)
-
-	c.queue.waitEmpty()
-	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
-		return false, err
-	}
-	var fenceToken cachecontract.FenceToken
-	var l2Err error
-	if c.fencedL2 != nil {
-		fenceToken, l2Err = c.fencedL2.ReserveFence(key)
-		if l2Err != nil {
-			newlyDegraded, flushDone := c.transitionToDegraded(l2Err)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return false, c.unavailableError()
-		}
-	}
-
 	l1Removed, l1Err := c.l1.Forget(key)
 	if l1Err != nil {
-		if releaseErr := c.releaseFence(key, fenceToken); releaseErr != nil {
-			c.markDirtyWithFence(key, fenceToken)
-			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return l1Removed, errors.Join(l1Err, c.unavailableError())
-		}
-		c.mutationMu.Unlock()
-		return l1Removed, l1Err
+		_, flushErr := c.l1.Flush()
+		l1Err = errors.Join(l1Err, flushErr)
 	}
-	var l2Removed bool
-	if c.fencedL2 != nil {
-		l2Removed, l2Err = c.fencedL2.ForgetIfFence(key, fenceToken)
-	} else {
-		l2Removed, l2Err = c.l2.Forget(key)
+	publishErr := c.publishKeyInvalidation(key)
+	if publishErr != nil {
+		c.markPendingInvalidation(key)
+		c.degradeLocked(publishErr, true)
 	}
-	var publishErr error
-	if l2Err == nil {
-		publishErr = c.publishKeyInvalidation(key)
-	}
-	backendErr := errors.Join(l1Err, l2Err, publishErr)
-	if backendErr != nil {
-		if l2Err != nil || publishErr != nil {
-			c.markDirtyWithFence(key, fenceToken)
-		}
-		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
-		if newlyDegraded {
-			c.flushL1Locked(flushDone)
-		}
-		c.mutationMu.Unlock()
-		return l1Removed || l2Removed, c.unavailableError()
-	}
-	if l2Err == nil {
-		c.pending.clear(key)
-	}
-	c.mutationMu.Unlock()
-	return l1Removed || l2Removed, nil
+	return l1Removed || l2Removed, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
 }
 
 func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
@@ -872,117 +664,71 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	}
 
 	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
 	if c.closed {
-		c.mutationMu.Unlock()
 		return false, ErrClosed
 	}
 	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
 		return false, err
+	}
+
+	l2Touched, l2Err := c.l2.Touch(key, ttl)
+	if l2Err != nil {
+		c.degradeLocked(l2Err, true)
+		return false, c.unavailableError()
 	}
 	c.mutationVersion.Add(1)
-
-	c.queue.waitEmpty()
-	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
-		return false, err
-	}
-	var fenceToken cachecontract.FenceToken
-	var l2Err error
-	if c.fencedL2 != nil {
-		fenceToken, l2Err = c.fencedL2.ReserveFence(key)
-		if l2Err != nil {
-			newlyDegraded, flushDone := c.transitionToDegraded(l2Err)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return false, c.unavailableError()
-		}
-	}
-
-	l1Touched, l1Err := c.l1.Touch(key, ttl)
-	if l1Err != nil {
-		if releaseErr := c.releaseFence(key, fenceToken); releaseErr != nil {
-			c.markDirtyWithFence(key, fenceToken)
-			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return l1Touched, errors.Join(l1Err, c.unavailableError())
-		}
-		c.mutationMu.Unlock()
-		return l1Touched, l1Err
-	}
-	var l2Touched bool
-	if c.fencedL2 != nil {
-		l2Touched, l2Err = c.fencedL2.TouchWithFence(key, ttl, fenceToken)
+	var l1Touched bool
+	var l1Err error
+	if l2Touched {
+		l1Touched, l1Err = c.l1.Touch(key, ttl)
 	} else {
-		l2Touched, l2Err = c.l2.Touch(key, ttl)
+		l1Touched, l1Err = c.l1.Forget(key)
 	}
-	var publishErr error
-	if l2Err == nil {
-		publishErr = c.publishKeyInvalidation(key)
+	if l1Err != nil {
+		_, flushErr := c.l1.Flush()
+		l1Err = errors.Join(l1Err, flushErr)
 	}
-	backendErr := errors.Join(l1Err, l2Err, publishErr)
-	if backendErr != nil {
-		if l2Err != nil || publishErr != nil {
-			c.markDirtyWithFence(key, fenceToken)
-		}
-		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
-		if newlyDegraded {
-			c.flushL1Locked(flushDone)
-		}
-		c.mutationMu.Unlock()
-		return l1Touched || l2Touched, c.unavailableError()
+	publishErr := c.publishKeyInvalidation(key)
+	if publishErr != nil {
+		c.markPendingInvalidation(key)
+		c.degradeLocked(publishErr, true)
 	}
-	c.mutationMu.Unlock()
-	return l1Touched || l2Touched, nil
+	return l2Touched || l1Touched, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
 }
 
 func (c *TieredCache) Flush() (bool, error) {
 	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
 	if c.closed {
-		c.mutationMu.Unlock()
 		return false, ErrClosed
 	}
 	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
 		return false, err
+	}
+
+	l2Flushed, l2Err := c.l2.Flush()
+	if l2Err != nil {
+		c.degradeLocked(l2Err, false)
+		return false, c.unavailableError()
 	}
 	c.mutationVersion.Add(1)
-
-	c.queue.waitEmpty()
-	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
-		return false, err
-	}
 	l1Flushed, l1Err := c.l1.Flush()
-	l2Flushed, l2Err := c.l2.Flush()
-	backendErr := errors.Join(l1Err, l2Err)
-	if backendErr != nil {
-		newlyDegraded, flushDone := c.transitionToDegraded(backendErr)
-		if newlyDegraded {
-			c.flushL1Locked(flushDone)
-		}
-		c.mutationMu.Unlock()
-		return false, c.unavailableError()
-	}
-	if err := c.publishFlushInvalidation(); err != nil {
+	publishErr := c.publishFlushInvalidation()
+	if publishErr != nil {
 		c.markPendingFlush()
-		newlyDegraded, flushDone := c.transitionToDegraded(err)
-		if newlyDegraded {
-			c.flushL1Locked(flushDone)
-		}
-		c.mutationMu.Unlock()
-		return false, c.unavailableError()
+		c.degradeLocked(publishErr, true)
 	}
-	if l2Err == nil {
-		c.pending.clearAll()
+	return l1Flushed && l2Flushed && l1Err == nil && publishErr == nil, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
+}
+
+func (c *TieredCache) unavailableErrorIf(operationErr error) error {
+	if operationErr == nil {
+		return nil
 	}
-	c.mutationMu.Unlock()
-	return l1Flushed && l2Flushed, nil
+	return c.unavailableError()
 }
 
 func (c *TieredCache) Close() error {
@@ -993,16 +739,15 @@ func (c *TieredCache) Close() error {
 		c.mutationMu.Lock()
 		c.closed = true
 		c.mutationVersion.Add(1)
-		c.queue.close()
 		close(c.recoveryStop)
 		if c.invalidationCancel != nil {
 			c.invalidationCancel()
 		}
 		c.mutationMu.Unlock()
 
-		<-c.workerDone
 		<-c.recoveryDone
 		<-c.invalidationDone
+
 		var invalidationErr error
 		if c.invalidationBus != nil {
 			invalidationErr = c.invalidationBus.Close()
@@ -1011,161 +756,4 @@ func (c *TieredCache) Close() error {
 	})
 
 	return c.closeErr
-}
-
-func (c *TieredCache) enqueueWrite(operation writeOperation) (bool, error) {
-	c.mutationMu.Lock()
-	if c.closed {
-		c.mutationMu.Unlock()
-		return false, ErrClosed
-	}
-	if err := c.unavailableError(); err != nil {
-		c.mutationMu.Unlock()
-		return false, err
-	}
-	c.mutationVersion.Add(1)
-	var err error
-	if int64(len(operation.value)) > c.queue.maxBytes {
-		c.mutationMu.Unlock()
-		return false, ErrWriteQueueValueTooLarge
-	}
-	if c.fencedL2 != nil {
-		operation.fenceToken, err = c.fencedL2.ReserveFence(operation.key)
-		if err != nil {
-			newlyDegraded, flushDone := c.transitionToDegraded(err)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return false, c.unavailableError()
-		}
-	}
-
-	var stored bool
-	if operation.forever {
-		stored, err = c.l1.Forever(operation.key, operation.value)
-	} else {
-		stored, err = c.l1.Set(operation.key, operation.value, operation.ttl)
-	}
-	if err != nil || !stored {
-		if releaseErr := c.releaseFence(operation.key, operation.fenceToken); releaseErr != nil {
-			c.markDirtyWithFence(operation.key, operation.fenceToken)
-			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return stored, errors.Join(err, c.unavailableError())
-		}
-		c.mutationMu.Unlock()
-		return stored, err
-	}
-
-	operation.keyGeneration = c.beginWriteGeneration(operation.key)
-	operation.flushGeneration = c.flushGeneration.Load()
-	c.pending.add(operation.key)
-	if err := c.queue.enqueue(operation, c.writeQueueWaitTimeout); err != nil {
-		c.pending.cancel(operation.key)
-		c.endWriteGeneration(operation.key)
-		if errors.Is(err, ErrWriteQueueTimeout) {
-			c.markDirtyWithFence(operation.key, operation.fenceToken)
-			newlyDegraded, flushDone := c.transitionToDegraded(err)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return false, c.unavailableError()
-		}
-		if releaseErr := c.releaseFence(operation.key, operation.fenceToken); releaseErr != nil {
-			c.markDirtyWithFence(operation.key, operation.fenceToken)
-			newlyDegraded, flushDone := c.transitionToDegraded(releaseErr)
-			if newlyDegraded {
-				c.flushL1Locked(flushDone)
-			}
-			c.mutationMu.Unlock()
-			return false, errors.Join(err, c.unavailableError())
-		}
-		c.mutationMu.Unlock()
-		return false, err
-	}
-	c.mutationMu.Unlock()
-	return true, nil
-}
-
-func (c *TieredCache) runWriter() {
-	defer close(c.workerDone)
-
-	for {
-		operation, ok := c.queue.dequeue()
-		if !ok {
-			return
-		}
-
-		stale := c.writeOperationStale(operation)
-		var err error
-		if !stale {
-			if c.fencedL2 != nil {
-				var stored bool
-				if operation.forever {
-					stored, err = c.fencedL2.ForeverWithFence(operation.key, operation.value, operation.fenceToken)
-				} else {
-					remainingTTL := operation.expiresAt.Sub(c.now())
-					if remainingTTL <= 0 {
-						stored, err = c.fencedL2.ForgetIfFence(operation.key, operation.fenceToken)
-					} else {
-						stored, err = c.fencedL2.SetWithFence(operation.key, operation.value, remainingTTL, operation.fenceToken)
-					}
-				}
-				if err == nil && !stored {
-					stale = true
-				}
-			} else if operation.forever {
-				_, err = c.l2.Forever(operation.key, operation.value)
-			} else {
-				remainingTTL := operation.expiresAt.Sub(c.now())
-				if remainingTTL <= 0 {
-					_, err = c.l2.Forget(operation.key)
-				} else {
-					_, err = c.l2.Set(operation.key, operation.value, remainingTTL)
-				}
-			}
-		}
-		if err == nil && !stale {
-			if c.writeOperationStale(operation) {
-				removed := true
-				if c.fencedL2 != nil {
-					removed, err = c.fencedL2.ForgetIfFence(operation.key, operation.fenceToken)
-				} else {
-					_, err = c.l2.Forget(operation.key)
-				}
-				if err == nil && removed {
-					// The generation change already invalidated peers, but
-					// publish again after cleanup so a concurrent newer write
-					// cannot remain warm in another pod's L1.
-					err = c.publishKeyInvalidation(operation.key)
-				}
-			} else {
-				err = c.publishKeyInvalidation(operation.key)
-			}
-		}
-		newlyDegraded := false
-		var flushDone chan struct{}
-		if err != nil {
-			c.markDirtyWithFence(operation.key, operation.fenceToken)
-			newlyDegraded, flushDone = c.transitionToDegraded(err)
-		}
-		c.pending.complete(operation.key)
-		c.endWriteGeneration(operation.key)
-		c.queue.complete(operation)
-		if newlyDegraded {
-			c.mutationMu.Lock()
-			c.flushL1Locked(flushDone)
-			c.mutationMu.Unlock()
-		}
-		if err != nil {
-			if c.onWriteError != nil {
-				c.onWriteError(operation.key, err)
-			}
-		}
-	}
 }

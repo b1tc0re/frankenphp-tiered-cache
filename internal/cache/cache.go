@@ -24,24 +24,3 @@ type Cache interface {
 	Flush() (bool, error)
 	Close() error
 }
-
-// FenceToken identifies the version of a key mutation reserved in L2.
-//
-// A token is opaque to the composition layer. A fenced backend must reject a
-// queued write when another instance has advanced the key's fence in the
-// meantime.
-type FenceToken string
-
-// FencedCache extends Cache with atomic L2 fencing operations used by
-// TieredCache when cross-instance invalidation is enabled.
-type FencedCache interface {
-	Cache
-
-	ReserveFence(key string) (FenceToken, error)
-	ReleaseFence(key string, token FenceToken) (bool, error)
-	SetWithFence(key string, value []byte, ttl time.Duration, token FenceToken) (bool, error)
-	ForeverWithFence(key string, value []byte, token FenceToken) (bool, error)
-	ForgetWithFence(key string) (bool, error)
-	ForgetIfFence(key string, token FenceToken) (bool, error)
-	TouchWithFence(key string, ttl time.Duration, token FenceToken) (bool, error)
-}
