@@ -2,9 +2,15 @@ package tiered
 
 import (
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
+)
+
+const (
+	maxInt64 = int64(^uint64(0) >> 1)
+	minInt64 = -maxInt64 - 1
 )
 
 func TestTieredCacheGetChecksL1BeforeL2(t *testing.T) {
@@ -252,6 +258,49 @@ func TestTieredCacheSynchronousMutationsUseBothLevels(t *testing.T) {
 	}
 }
 
+func TestTieredCacheIncrementAndDecrementUseRedisAndForgetL1(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l1.put("counter", []byte("10"), time.Minute)
+	l2.put("counter", []byte("10"), time.Minute)
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	if got, err := cache.Increment("counter", 2); err != nil || got != 12 {
+		t.Fatalf("Increment() = (%d, %v), want (12, nil)", got, err)
+	}
+	if value, _, err := l1.Get("counter"); err != nil || value != nil {
+		t.Fatalf("L1 after Increment() = (%q, %v), want (nil, nil)", value, err)
+	}
+	if value, ttl, err := l2.Get("counter"); err != nil || string(value) != "12" || ttl != time.Minute {
+		t.Fatalf("L2 after Increment() = (%q, %v, %v), want (12, %v, nil)", value, ttl, err, time.Minute)
+	}
+
+	if got, err := cache.Decrement("counter", 5); err != nil || got != 7 {
+		t.Fatalf("Decrement() = (%d, %v), want (7, nil)", got, err)
+	}
+	if value, _, err := l1.Get("counter"); err != nil || value != nil {
+		t.Fatalf("L1 after Decrement() = (%q, %v), want (nil, nil)", value, err)
+	}
+}
+
+func TestTieredCacheCounterReturnsCommittedValueWhenL1InvalidationFails(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l1.put("counter", []byte("10"), time.Minute)
+	l2.put("counter", []byte("10"), time.Minute)
+	wantErr := errors.New("L1 unavailable")
+	l1.forgetErr = wantErr
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	got, err := cache.Increment("counter", 1)
+	if got != 11 || !errors.Is(err, wantErr) {
+		t.Fatalf("Increment() = (%d, %v), want committed value 11 and L1 error", got, err)
+	}
+	if value, _, getErr := l2.Get("counter"); getErr != nil || string(value) != "11" {
+		t.Fatalf("L2 after failed L1 invalidation = (%q, %v), want (11, nil)", value, getErr)
+	}
+}
+
 func TestTieredCacheCloseOperationsReturnErrClosed(t *testing.T) {
 	cache := newTestTieredCache(t, Config{}, newFakeCache(), newFakeCache())
 	if err := cache.Close(); err != nil {
@@ -275,6 +324,12 @@ func TestTieredCacheCloseOperationsReturnErrClosed(t *testing.T) {
 	}
 	if ok, err := cache.Flush(); ok || !errors.Is(err, ErrClosed) {
 		t.Fatalf("Flush() = (%t, %v), want (false, ErrClosed)", ok, err)
+	}
+	if got, err := cache.Increment("key", 1); got != 0 || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Increment() = (%d, %v), want (0, ErrClosed)", got, err)
+	}
+	if got, err := cache.Decrement("key", 1); got != 0 || !errors.Is(err, ErrClosed) {
+		t.Fatalf("Decrement() = (%d, %v), want (0, ErrClosed)", got, err)
 	}
 }
 
@@ -322,6 +377,8 @@ type fakeCache struct {
 
 	getErr     error
 	setErr     error
+	incrErr    error
+	decrErr    error
 	forgetErr  error
 	touchErr   error
 	flushErr   error
@@ -422,6 +479,46 @@ func (f *fakeCache) Set(key string, value []byte, ttl time.Duration) (bool, erro
 
 func (f *fakeCache) Forever(key string, value []byte) (bool, error) {
 	return f.Set(key, value, 0)
+}
+
+func (f *fakeCache) Increment(key string, value int64) (int64, error) {
+	return f.changeCounter(key, value, false)
+}
+
+func (f *fakeCache) Decrement(key string, value int64) (int64, error) {
+	return f.changeCounter(key, value, true)
+}
+
+func (f *fakeCache) changeCounter(key string, value int64, decrement bool) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if decrement {
+		if f.decrErr != nil {
+			return 0, f.decrErr
+		}
+		if value == minInt64 {
+			return 0, errors.New("counter overflow")
+		}
+		value = -value
+	} else if f.incrErr != nil {
+		return 0, f.incrErr
+	}
+
+	var current int64
+	if raw, ok := f.values[key]; ok {
+		parsed, err := strconv.ParseInt(string(raw), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		current = parsed
+	}
+	if (value > 0 && current > maxInt64-value) || (value < 0 && current < minInt64-value) {
+		return 0, errors.New("counter overflow")
+	}
+	current += value
+	f.values[key] = []byte(strconv.FormatInt(current, 10))
+	return current, nil
 }
 
 func (f *fakeCache) Forget(key string) (bool, error) {

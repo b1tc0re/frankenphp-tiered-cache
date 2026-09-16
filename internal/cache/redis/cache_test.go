@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,11 @@ import (
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 	goredis "github.com/redis/go-redis/v9"
+)
+
+const (
+	maxInt64 = int64(^uint64(0) >> 1)
+	minInt64 = -maxInt64 - 1
 )
 
 func TestRedisCacheSetGetAndForever(t *testing.T) {
@@ -116,6 +122,41 @@ func TestRedisCacheForgetAndTouch(t *testing.T) {
 	}
 	if ok, err := cache.Forget("key"); err != nil || ok {
 		t.Fatalf("Forget(missing) = (%t, %v), want (false, nil)", ok, err)
+	}
+}
+
+func TestRedisCacheIncrementAndDecrement(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	if got, err := cache.Increment("counter", 2); err != nil || got != 2 {
+		t.Fatalf("Increment(missing) = (%d, %v), want (2, nil)", got, err)
+	}
+	if got, err := cache.Increment("counter", 3); err != nil || got != 5 {
+		t.Fatalf("Increment(existing) = (%d, %v), want (5, nil)", got, err)
+	}
+	if got, err := cache.Decrement("counter", 4); err != nil || got != 1 {
+		t.Fatalf("Decrement(existing) = (%d, %v), want (1, nil)", got, err)
+	}
+
+	value, ttl, err := cache.Get("counter")
+	if err != nil || string(value) != "1" || ttl != 0 {
+		t.Fatalf("Get(counter) = (%q, %v, %v), want (1, 0, nil)", value, ttl, err)
+	}
+}
+
+func TestRedisCacheCounterErrorsArePropagated(t *testing.T) {
+	wantErr := errors.New("counter is not an integer")
+	client := newFakeClient()
+	client.incrErr = wantErr
+	client.decrErr = wantErr
+	cache := newWithClient(client, "test:")
+
+	if _, err := cache.Increment("counter", 1); !errors.Is(err, wantErr) {
+		t.Fatalf("Increment() error = %v, want %v", err, wantErr)
+	}
+	if _, err := cache.Decrement("counter", 1); !errors.Is(err, wantErr) {
+		t.Fatalf("Decrement() error = %v, want %v", err, wantErr)
 	}
 }
 
@@ -243,6 +284,8 @@ type fakeClient struct {
 
 	getErr    error
 	setErr    error
+	incrErr   error
+	decrErr   error
 	delErr    error
 	expireErr error
 	scanErr   error
@@ -283,6 +326,46 @@ func (f *fakeClient) Set(_ context.Context, key string, value []byte, ttl time.D
 	f.values[key] = append([]byte(nil), value...)
 	f.ttls[key] = ttl
 	return nil
+}
+
+func (f *fakeClient) IncrBy(_ context.Context, key string, value int64) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.incrErr != nil {
+		return 0, f.incrErr
+	}
+	return f.changeCounter(key, value, false)
+}
+
+func (f *fakeClient) DecrBy(_ context.Context, key string, value int64) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.decrErr != nil {
+		return 0, f.decrErr
+	}
+	return f.changeCounter(key, value, true)
+}
+
+func (f *fakeClient) changeCounter(key string, value int64, decrement bool) (int64, error) {
+	current := int64(0)
+	if raw, ok := f.values[key]; ok {
+		parsed, err := strconv.ParseInt(string(raw), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		current = parsed
+	}
+	if decrement {
+		value = -value
+	}
+	if (value > 0 && current > maxInt64-value) || (value < 0 && current < minInt64-value) {
+		return 0, errors.New("counter overflow")
+	}
+	current += value
+	f.values[key] = []byte(strconv.FormatInt(current, 10))
+	return current, nil
 }
 
 func (f *fakeClient) Del(_ context.Context, keys ...string) (int64, error) {

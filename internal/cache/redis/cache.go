@@ -15,6 +15,8 @@ import (
 type client interface {
 	Get(ctx context.Context, key string) ([]byte, time.Duration, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	IncrBy(ctx context.Context, key string, value int64) (int64, error)
+	DecrBy(ctx context.Context, key string, value int64) (int64, error)
 	Del(ctx context.Context, keys ...string) (int64, error)
 	Expire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 	Scan(ctx context.Context, cursor uint64, match string, count int64) ([]string, uint64, error)
@@ -44,6 +46,14 @@ func (c redisClient) Get(ctx context.Context, key string) ([]byte, time.Duration
 
 func (c redisClient) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	return c.client.Set(ctx, key, value, ttl).Err()
+}
+
+func (c redisClient) IncrBy(ctx context.Context, key string, value int64) (int64, error) {
+	return c.client.IncrBy(ctx, key, value).Result()
+}
+
+func (c redisClient) DecrBy(ctx context.Context, key string, value int64) (int64, error) {
+	return c.client.DecrBy(ctx, key, value).Result()
 }
 
 func (c redisClient) Del(ctx context.Context, keys ...string) (int64, error) {
@@ -128,6 +138,18 @@ func (c *RedisCache) Forever(key string, value []byte) (bool, error) {
 
 	err := c.client.Set(context.Background(), c.prefixedKey(key), value, 0)
 	return err == nil, err
+}
+
+// Increment atomically increments a signed Redis counter. Redis keeps the
+// existing TTL, or creates a persistent key when the counter is missing.
+func (c *RedisCache) Increment(key string, value int64) (int64, error) {
+	return c.client.IncrBy(context.Background(), c.prefixedKey(key), value)
+}
+
+// Decrement atomically decrements a signed Redis counter. Redis keeps the
+// existing TTL, or creates a persistent key when the counter is missing.
+func (c *RedisCache) Decrement(key string, value int64) (int64, error) {
+	return c.client.DecrBy(context.Background(), c.prefixedKey(key), value)
 }
 
 func (c *RedisCache) Forget(key string) (bool, error) {

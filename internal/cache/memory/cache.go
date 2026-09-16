@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"math/rand/v2"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,6 +184,18 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	return true, nil
 }
 
+// Increment atomically changes a signed decimal counter in the local cache.
+// TieredCache deliberately does not use this method for counters: Redis is
+// authoritative there and the L1 entry is invalidated after the L2 mutation.
+func (c *MemoryCache) Increment(key string, value int64) (int64, error) {
+	return c.changeCounter(key, value, false)
+}
+
+// Decrement atomically changes a signed decimal counter in the local cache.
+func (c *MemoryCache) Decrement(key string, value int64) (int64, error) {
+	return c.changeCounter(key, value, true)
+}
+
 // Flush removes every entry from this MemoryCache instance.
 func (c *MemoryCache) Flush() (bool, error) {
 	c.evictionMu.Lock()
@@ -258,6 +271,103 @@ func (c *MemoryCache) set(key string, value []byte, ttl time.Duration, forever b
 		}
 	}
 }
+
+func (c *MemoryCache) changeCounter(key string, value int64, decrement bool) (int64, error) {
+	shard := c.shardFor(key)
+
+	for {
+		shard.mu.Lock()
+		entry := shard.entries[key]
+		if entry != nil && isExpired(entry.expiresAt, c.now()) {
+			delete(shard.entries, key)
+			c.current.Add(-entry.cost)
+			entry = nil
+		}
+
+		current := int64(0)
+		oldCost := int64(0)
+		expiresAt := time.Time{}
+		if entry != nil {
+			parsed, err := strconv.ParseInt(string(entry.value), 10, 64)
+			if err != nil {
+				shard.mu.Unlock()
+				return 0, fmt.Errorf("cache: counter value is not a signed integer: %w", err)
+			}
+			current = parsed
+			oldCost = entry.cost
+			expiresAt = entry.expiresAt
+		}
+
+		result, err := counterResult(current, value, decrement)
+		if err != nil {
+			shard.mu.Unlock()
+			return 0, err
+		}
+
+		encoded := []byte(strconv.FormatInt(result, 10))
+		cost := itemCost(key, encoded)
+		if cost > c.maxItemSize {
+			shard.mu.Unlock()
+			return 0, fmt.Errorf(
+				"%w: item size %d bytes exceeds limit %d bytes",
+				cachecontract.ErrItemTooLarge,
+				cost,
+				c.maxItemSize,
+			)
+		}
+
+		delta := cost - oldCost
+		if delta <= 0 || c.tryReserve(delta) {
+			newEntry := &memoryEntry{
+				value:     encoded,
+				expiresAt: expiresAt,
+				cost:      cost,
+			}
+			c.recordAccess(newEntry)
+			shard.entries[key] = newEntry
+			if delta < 0 {
+				c.current.Add(delta)
+			}
+			shard.mu.Unlock()
+			return result, nil
+		}
+		shard.mu.Unlock()
+
+		evicted, summary := c.evictFor(delta)
+		c.notifyEviction(summary)
+		if !evicted {
+			return 0, cachecontract.ErrInsufficientMemory
+		}
+	}
+}
+
+func counterResult(current, value int64, decrement bool) (int64, error) {
+	if !decrement {
+		return checkedCounterAdd(current, value)
+	}
+	if value == minInt64 {
+		if current >= 0 {
+			return 0, cachecontract.ErrCounterOverflow
+		}
+		return maxInt64 + current + 1, nil
+	}
+	return checkedCounterAdd(current, -value)
+}
+
+func checkedCounterAdd(current, value int64) (int64, error) {
+	if value > 0 && current > maxInt64-value {
+		return 0, cachecontract.ErrCounterOverflow
+	}
+	if value < 0 && current < minInt64-value {
+		return 0, cachecontract.ErrCounterOverflow
+	}
+	return current + value, nil
+}
+
+const (
+	maxInt64 = int64(^uint64(0) >> 1)
+	minInt64 = -maxInt64 - 1
+)
 
 func (c *MemoryCache) recordAccess(entry *memoryEntry) {
 	storeMaxAccessClock(entry, c.lruClock.Load())

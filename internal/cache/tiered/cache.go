@@ -579,6 +579,61 @@ func (c *TieredCache) Forever(key string, value []byte) (bool, error) {
 	return c.set(key, value, 0, true)
 }
 
+// Increment atomically changes the authoritative Redis counter and
+// invalidates the local copy. The returned value remains valid even when a
+// post-commit L1 or Pub/Sub step reports an error; callers must not retry the
+// operation solely because such an error was returned.
+func (c *TieredCache) Increment(key string, value int64) (int64, error) {
+	return c.changeCounter(key, value, false)
+}
+
+// Decrement atomically changes the authoritative Redis counter and
+// invalidates the local copy.
+func (c *TieredCache) Decrement(key string, value int64) (int64, error) {
+	return c.changeCounter(key, value, true)
+}
+
+func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (int64, error) {
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
+	if c.closed {
+		return 0, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		return 0, err
+	}
+
+	var result int64
+	var l2Err error
+	if decrement {
+		result, l2Err = c.l2.Decrement(key, value)
+	} else {
+		result, l2Err = c.l2.Increment(key, value)
+	}
+	if l2Err != nil {
+		c.degradeLocked(l2Err, false)
+		return 0, c.unavailableError()
+	}
+
+	// Redis has committed. The result must be returned with any later error so
+	// callers do not repeat a mutation that already changed the counter.
+	c.mutationVersion.Add(1)
+	_, l1Err := c.l1.Forget(key)
+	if l1Err != nil {
+		_, flushErr := c.l1.Flush()
+		l1Err = errors.Join(l1Err, flushErr)
+	}
+
+	publishErr := c.publishKeyInvalidation(key)
+	if publishErr != nil {
+		c.markPendingInvalidation(key)
+		c.degradeLocked(publishErr, true)
+	}
+
+	return result, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
+}
+
 func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever bool) (bool, error) {
 	c.mutationMu.Lock()
 	defer c.mutationMu.Unlock()

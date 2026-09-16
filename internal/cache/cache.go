@@ -6,9 +6,11 @@ import (
 )
 
 var (
-	ErrInvalidTTL   = errors.New("cache: ttl must be greater than zero")
-	ErrNilValue     = errors.New("cache: nil value is not allowed")
-	ErrItemTooLarge = errors.New("cache: item exceeds maximum size")
+	ErrInvalidTTL        = errors.New("cache: ttl must be greater than zero")
+	ErrNilValue          = errors.New("cache: nil value is not allowed")
+	ErrItemTooLarge      = errors.New("cache: item exceeds maximum size")
+	ErrInsufficientMemory = errors.New("cache: insufficient memory")
+	ErrCounterOverflow   = errors.New("cache: counter overflow")
 )
 
 type Cache interface {
@@ -22,5 +24,7 @@ type Cache interface {
 	Forget(key string) (bool, error)
 	Touch(key string, ttl time.Duration) (bool, error)
 	Flush() (bool, error)
+	Increment(key string, value int64) (int64, error)
+	Decrement(key string, value int64) (int64, error)
 	Close() error
 }
