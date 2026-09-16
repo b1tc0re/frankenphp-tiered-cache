@@ -159,12 +159,39 @@ func wrapRedisCommandError(err error) error {
 		return nil
 	}
 
+	// A generic RedisError includes both logical command rejections and
+	// infrastructure/state errors. Only the former may stay outside degraded.
 	var redisErr goredis.Error
-	if errors.As(err, &redisErr) {
+	if errors.As(err, &redisErr) && !isRedisInfrastructureError(err) {
 		return fmt.Errorf("%w: %w", cachecontract.ErrRedisCommand, err)
 	}
 
 	return err
+}
+
+func isRedisInfrastructureError(err error) bool {
+	if goredis.IsLoadingError(err) ||
+		goredis.IsReadOnlyError(err) ||
+		goredis.IsClusterDownError(err) ||
+		goredis.IsTryAgainError(err) ||
+		goredis.IsMasterDownError(err) ||
+		goredis.IsMaxClientsError(err) ||
+		goredis.IsAuthError(err) ||
+		goredis.IsPermissionError(err) ||
+		goredis.IsExecAbortError(err) ||
+		goredis.IsOOMError(err) ||
+		goredis.IsNoReplicasError(err) {
+		return true
+	}
+
+	if _, ok := goredis.IsMovedError(err); ok {
+		return true
+	}
+	if _, ok := goredis.IsAskError(err); ok {
+		return true
+	}
+
+	return errors.Is(err, goredis.ErrCrossSlot) || errors.Is(err, goredis.ErrNoScript)
 }
 
 func (c *RedisCache) Forget(key string) (bool, error) {

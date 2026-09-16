@@ -175,6 +175,41 @@ func TestRedisCacheWrapsRedisCommandErrors(t *testing.T) {
 	}
 }
 
+func TestRedisCacheLeavesInfrastructureErrorsForTiered(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "loading", err: fakeRedisError("LOADING Redis is loading the dataset")},
+		{name: "readonly", err: fakeRedisError("READONLY You can't write against a read only replica")},
+		{name: "clusterdown", err: fakeRedisError("CLUSTERDOWN The cluster is down")},
+		{name: "masterdown", err: fakeRedisError("MASTERDOWN Link with MASTER is down")},
+		{name: "tryagain", err: fakeRedisError("TRYAGAIN Temporary error")},
+		{name: "maxclients", err: fakeRedisError("ERR max number of clients reached")},
+		{name: "noauth", err: fakeRedisError("NOAUTH Authentication required")},
+		{name: "noperm", err: fakeRedisError("NOPERM this user has no permissions")},
+		{name: "execabort", err: fakeRedisError("EXECABORT Transaction discarded")},
+		{name: "oom", err: fakeRedisError("OOM command not allowed when used memory > 'maxmemory'")},
+		{name: "noreplicas", err: fakeRedisError("NOREPLICAS Not enough good replicas")},
+		{name: "moved", err: fakeRedisError("MOVED 3999 127.0.0.1:6381")},
+		{name: "ask", err: fakeRedisError("ASK 3999 127.0.0.1:6381")},
+		{name: "crossslot", err: goredis.ErrCrossSlot},
+		{name: "noscript", err: goredis.ErrNoScript},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeClient()
+			client.incrErr = test.err
+			cache := newWithClient(client, "test:")
+
+			if _, err := cache.Increment("counter", 1); errors.Is(err, cachecontract.ErrRedisCommand) {
+				t.Fatalf("Increment() error = %v, must not be marked as a safe command error", err)
+			}
+		})
+	}
+}
+
 func TestRedisCacheFlushOnlyDeletesItsPrefix(t *testing.T) {
 	client := newFakeClient()
 	cache := newWithClient(client, "test:")
