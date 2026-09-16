@@ -8,6 +8,8 @@ import "C"
 import (
 	"fmt"
 	"math"
+	"os"
+	"strconv"
 	"time"
 	"unsafe"
 
@@ -16,12 +18,14 @@ import (
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 	"github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/memory"
+	redisbackend "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/redis"
+	tieredcache "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/tiered"
 	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
-var phpMemoryCache cachecontract.Cache
+var phpTieredCache cachecontract.Cache
 
-const phpMemoryPressureLogInterval = 10 * time.Second
+const phpTieredPressureLogInterval = 10 * time.Second
 
 type phpMemoryObserver struct {
 	reporter *observability.PressureReporter
@@ -32,7 +36,7 @@ func (o *phpMemoryObserver) OnEviction(summary memory.EvictionSummary) {
 }
 
 func init() {
-	reporter, err := observability.NewPressureReporter(phpMemoryPressureLogInterval, func(summary observability.PressureSummary) {
+	reporter, err := observability.NewPressureReporter(phpTieredPressureLogInterval, func(summary observability.PressureSummary) {
 		caddy.Log().Named("franken_cache").Warn(fmt.Sprintf(
 			"MemoryCache evicted live entries due to memory pressure: evicted_entries=%d evicted_bytes=%d window=%s",
 			summary.EvictedEntries,
@@ -44,19 +48,59 @@ func init() {
 		panic(fmt.Sprintf("franken_cache: initialize pressure reporter: %v", err))
 	}
 
-	cache, err := memory.New(memory.Config{Observer: &phpMemoryObserver{reporter: reporter}})
+	l1, err := memory.New(memory.Config{Observer: &phpMemoryObserver{reporter: reporter}})
 	if err != nil {
 		reporter.Close()
 		panic(fmt.Sprintf("franken_cache: initialize MemoryCache: %v", err))
 	}
-	phpMemoryCache = cache
+
+	redisConfig, err := phpRedisConfigFromEnv()
+	if err != nil {
+		_ = l1.Close()
+		reporter.Close()
+		panic(fmt.Sprintf("franken_cache: parse Redis configuration: %v", err))
+	}
+
+	l2, err := redisbackend.New(redisConfig)
+	if err != nil {
+		_ = l1.Close()
+		reporter.Close()
+		panic(fmt.Sprintf("franken_cache: initialize RedisCache: %v", err))
+	}
+
+	bus, err := redisbackend.NewInvalidationBus(redisConfig)
+	if err != nil {
+		_ = l2.Close()
+		_ = l1.Close()
+		reporter.Close()
+		panic(fmt.Sprintf("franken_cache: initialize Redis invalidation bus: %v", err))
+	}
+
+	tieredConfig, err := phpTieredConfigFromEnv()
+	if err != nil {
+		_ = bus.Close()
+		_ = l2.Close()
+		_ = l1.Close()
+		reporter.Close()
+		panic(fmt.Sprintf("franken_cache: parse TieredCache configuration: %v", err))
+	}
+
+	cache, err := tieredcache.NewWithInvalidation(tieredConfig, l1, l2, bus)
+	if err != nil {
+		_ = bus.Close()
+		_ = l2.Close()
+		_ = l1.Close()
+		reporter.Close()
+		panic(fmt.Sprintf("franken_cache: initialize TieredCache: %v", err))
+	}
+	phpTieredCache = cache
 
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.franken_cache_module_entry))
 }
 
-//export franken_cache_memory_get_go
-func franken_cache_memory_get_go(key *C.zend_string, status *C.int) *C.zend_string {
-	value, _, err := phpMemoryCache.Get(frankenphp.GoString(unsafe.Pointer(key)))
+//export franken_cache_tiered_get_go
+func franken_cache_tiered_get_go(key *C.zend_string, status *C.int) *C.zend_string {
+	value, _, err := phpTieredCache.Get(frankenphp.GoString(unsafe.Pointer(key)))
 	if err != nil {
 		*status = -1
 		return nil
@@ -75,14 +119,14 @@ func franken_cache_memory_get_go(key *C.zend_string, status *C.int) *C.zend_stri
 	return (*C.zend_string)(frankenphp.PHPString(valueString, false))
 }
 
-//export franken_cache_memory_set_go
-func franken_cache_memory_set_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
+//export franken_cache_tiered_set_go
+func franken_cache_tiered_set_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)
 	if !ok {
 		return -1
 	}
 
-	stored, err := phpMemoryCache.Set(
+	stored, err := phpTieredCache.Set(
 		frankenphp.GoString(unsafe.Pointer(key)),
 		phpBytes(value),
 		ttl,
@@ -90,36 +134,113 @@ func franken_cache_memory_set_go(key, value *C.zend_string, ttlSeconds C.zend_lo
 	return phpBoolResult(stored, err)
 }
 
-//export franken_cache_memory_forever_go
-func franken_cache_memory_forever_go(key, value *C.zend_string) C.int {
-	stored, err := phpMemoryCache.Forever(
+//export franken_cache_tiered_forever_go
+func franken_cache_tiered_forever_go(key, value *C.zend_string) C.int {
+	stored, err := phpTieredCache.Forever(
 		frankenphp.GoString(unsafe.Pointer(key)),
 		phpBytes(value),
 	)
 	return phpBoolResult(stored, err)
 }
 
-//export franken_cache_memory_forget_go
-func franken_cache_memory_forget_go(key *C.zend_string) C.int {
-	removed, err := phpMemoryCache.Forget(frankenphp.GoString(unsafe.Pointer(key)))
+//export franken_cache_tiered_forget_go
+func franken_cache_tiered_forget_go(key *C.zend_string) C.int {
+	removed, err := phpTieredCache.Forget(frankenphp.GoString(unsafe.Pointer(key)))
 	return phpBoolResult(removed, err)
 }
 
-//export franken_cache_memory_touch_go
-func franken_cache_memory_touch_go(key *C.zend_string, ttlSeconds C.zend_long) C.int {
+//export franken_cache_tiered_touch_go
+func franken_cache_tiered_touch_go(key *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)
 	if !ok {
 		return -1
 	}
 
-	touched, err := phpMemoryCache.Touch(frankenphp.GoString(unsafe.Pointer(key)), ttl)
+	touched, err := phpTieredCache.Touch(frankenphp.GoString(unsafe.Pointer(key)), ttl)
 	return phpBoolResult(touched, err)
 }
 
-//export franken_cache_memory_flush_go
-func franken_cache_memory_flush_go() C.int {
-	flushed, err := phpMemoryCache.Flush()
+//export franken_cache_tiered_flush_go
+func franken_cache_tiered_flush_go() C.int {
+	flushed, err := phpTieredCache.Flush()
 	return phpBoolResult(flushed, err)
+}
+
+//export franken_cache_tiered_increment_go
+func franken_cache_tiered_increment_go(key *C.zend_string, value C.zend_long, result *C.zend_long) C.int {
+	changed, err := phpTieredCache.Increment(
+		frankenphp.GoString(unsafe.Pointer(key)),
+		int64(value),
+	)
+	if err != nil {
+		return -1
+	}
+
+	*result = C.zend_long(changed)
+	return 0
+}
+
+//export franken_cache_tiered_decrement_go
+func franken_cache_tiered_decrement_go(key *C.zend_string, value C.zend_long, result *C.zend_long) C.int {
+	changed, err := phpTieredCache.Decrement(
+		frankenphp.GoString(unsafe.Pointer(key)),
+		int64(value),
+	)
+	if err != nil {
+		return -1
+	}
+
+	*result = C.zend_long(changed)
+	return 0
+}
+
+func phpRedisConfigFromEnv() (redisbackend.Config, error) {
+	config := redisbackend.Config{
+		Addr:      os.Getenv("FRANKEN_CACHE_REDIS_ADDR"),
+		Username:  os.Getenv("FRANKEN_CACHE_REDIS_USERNAME"),
+		Password:  os.Getenv("FRANKEN_CACHE_REDIS_PASSWORD"),
+		KeyPrefix: os.Getenv("FRANKEN_CACHE_REDIS_PREFIX"),
+	}
+
+	if value, ok := os.LookupEnv("FRANKEN_CACHE_REDIS_DB"); ok {
+		db, err := strconv.Atoi(value)
+		if err != nil {
+			return redisbackend.Config{}, fmt.Errorf("FRANKEN_CACHE_REDIS_DB must be an integer: %w", err)
+		}
+		config.DB = db
+	}
+
+	for _, setting := range []struct {
+		name   string
+		target *time.Duration
+	}{
+		{name: "FRANKEN_CACHE_REDIS_DIAL_TIMEOUT", target: &config.DialTimeout},
+		{name: "FRANKEN_CACHE_REDIS_READ_TIMEOUT", target: &config.ReadTimeout},
+		{name: "FRANKEN_CACHE_REDIS_WRITE_TIMEOUT", target: &config.WriteTimeout},
+	} {
+		if value, ok := os.LookupEnv(setting.name); ok {
+			duration, err := time.ParseDuration(value)
+			if err != nil {
+				return redisbackend.Config{}, fmt.Errorf("%s must be a duration: %w", setting.name, err)
+			}
+			*setting.target = duration
+		}
+	}
+
+	return config, nil
+}
+
+func phpTieredConfigFromEnv() (tieredcache.Config, error) {
+	config := tieredcache.Config{}
+	if value, ok := os.LookupEnv("FRANKEN_CACHE_RECOVERY_INTERVAL"); ok {
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return tieredcache.Config{}, fmt.Errorf("FRANKEN_CACHE_RECOVERY_INTERVAL must be a duration: %w", err)
+		}
+		config.RecoveryInterval = duration
+	}
+
+	return config, nil
 }
 
 func phpBytes(value *C.zend_string) []byte {
