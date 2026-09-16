@@ -510,6 +510,7 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 		}
 
 		version := c.mutationVersion.Load()
+		started := time.Now()
 		l2Value, l2TTL, l2Err := c.l2.Get(key)
 
 		c.mutationMu.Lock()
@@ -547,6 +548,11 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 		}
 
 		if l2TTL > 0 {
+			l2TTL -= time.Since(started)
+			if l2TTL <= 0 {
+				c.mutationMu.Unlock()
+				return nil, 0, nil
+			}
 			_, _ = c.l1.Set(key, l2Value, l2TTL)
 		} else {
 			_, _ = c.l1.Forever(key, l2Value)
@@ -584,6 +590,11 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 		return false, err
 	}
 
+	var deadline time.Time
+	if !forever {
+		deadline = time.Now().Add(ttl)
+	}
+
 	var stored bool
 	var l2Err error
 	if forever {
@@ -607,7 +618,13 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 	if forever {
 		l1Stored, l1Err = c.l1.Forever(key, value)
 	} else {
-		l1Stored, l1Err = c.l1.Set(key, value, ttl)
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			l1Stored, l1Err = c.l1.Set(key, value, remaining)
+		} else {
+			_, l1Err = c.l1.Forget(key)
+			l1Stored = true
+		}
 	}
 	if l1Err == nil && !l1Stored {
 		l1Err = errL1MutationNotStored
@@ -673,6 +690,7 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		return false, err
 	}
 
+	deadline := time.Now().Add(ttl)
 	l2Touched, l2Err := c.l2.Touch(key, ttl)
 	if l2Err != nil {
 		c.degradeLocked(l2Err, true)
@@ -682,7 +700,13 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 	var l1Touched bool
 	var l1Err error
 	if l2Touched {
-		l1Touched, l1Err = c.l1.Touch(key, ttl)
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			l1Touched, l1Err = c.l1.Touch(key, remaining)
+		} else {
+			_, l1Err = c.l1.Forget(key)
+			l1Touched = true
+		}
 	} else {
 		l1Touched, l1Err = c.l1.Forget(key)
 	}

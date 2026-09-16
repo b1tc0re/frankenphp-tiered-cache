@@ -29,22 +29,23 @@ func TestTieredCacheGetChecksL1BeforeL2(t *testing.T) {
 func TestTieredCacheGetWarmsL1WithRemainingTTL(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
-	l2.put("key", []byte("value"), 42*time.Second)
+	l2.put("key", []byte("value"), time.Second)
+	l2.getDelay = 50 * time.Millisecond
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
 	value, ttl, err := cache.Get("key")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if string(value) != "value" || ttl != 42*time.Second {
-		t.Fatalf("Get() = (%q, %v), want (value, %v)", value, ttl, 42*time.Second)
+	if string(value) != "value" || ttl <= 0 || ttl >= time.Second-25*time.Millisecond {
+		t.Fatalf("Get() = (%q, %v), want (value, reduced positive TTL)", value, ttl)
 	}
 	_, l1TTL, err := l1.Get("key")
 	if err != nil {
 		t.Fatalf("L1 Get() error = %v", err)
 	}
-	if l1TTL != 42*time.Second {
-		t.Fatalf("warmed L1 TTL = %v, want %v", l1TTL, 42*time.Second)
+	if l1TTL != ttl {
+		t.Fatalf("warmed L1 TTL = %v, Get() TTL = %v; want equal remaining TTLs", l1TTL, ttl)
 	}
 }
 
@@ -319,12 +320,15 @@ type fakeCache struct {
 	values map[string][]byte
 	ttls   map[string]time.Duration
 
-	getErr    error
-	setErr    error
-	forgetErr error
-	touchErr  error
-	flushErr  error
-	closeErr  error
+	getErr     error
+	setErr     error
+	forgetErr  error
+	touchErr   error
+	flushErr   error
+	closeErr   error
+	getDelay   time.Duration
+	setDelay   time.Duration
+	touchDelay time.Duration
 
 	getStarted  chan struct{}
 	releaseGet  chan struct{}
@@ -360,6 +364,7 @@ func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 	ttl := f.ttls[key]
 	started := f.getStarted
 	release := f.releaseGet
+	delay := f.getDelay
 	f.mu.Unlock()
 
 	if started != nil {
@@ -370,6 +375,9 @@ func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 	}
 	if release != nil {
 		<-release
+	}
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 	if err != nil {
 		return nil, 0, err
@@ -387,6 +395,7 @@ func (f *fakeCache) Set(key string, value []byte, ttl time.Duration) (bool, erro
 	started := f.setStarted
 	release := f.releaseSet
 	hook := f.setHook
+	delay := f.setDelay
 	f.mu.Unlock()
 
 	if hook != nil {
@@ -400,6 +409,9 @@ func (f *fakeCache) Set(key string, value []byte, ttl time.Duration) (bool, erro
 	}
 	if release != nil {
 		<-release
+	}
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 	if err != nil {
 		return false, err
@@ -429,13 +441,23 @@ func (f *fakeCache) Forget(key string) (bool, error) {
 
 func (f *fakeCache) Touch(key string, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.touchErr != nil {
-		return false, f.touchErr
+	err := f.touchErr
+	_, exists := f.values[key]
+	delay := f.touchDelay
+	f.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
 	}
-	if _, exists := f.values[key]; !exists {
+	if err != nil {
+		return false, err
+	}
+	if !exists {
 		return false, nil
 	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.ttls[key] = ttl
 	return true, nil
 }
