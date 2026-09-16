@@ -598,6 +598,66 @@ func (c *TieredCache) Set(key string, value []byte, ttl time.Duration) (bool, er
 	return c.set(key, value, ttl, false)
 }
 
+// Add stores value only when the key is absent in the authoritative L2.
+// Redis performs the check and mutation atomically; L1 is updated only after
+// that mutation has committed.
+func (c *TieredCache) Add(key string, value []byte, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+	if value == nil {
+		return false, cachecontract.ErrNilValue
+	}
+
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+
+	if c.closed {
+		return false, ErrClosed
+	}
+	if err := c.unavailableError(); err != nil {
+		return false, err
+	}
+
+	deadline := time.Now().Add(ttl)
+	added, l2Err := c.l2.Add(key, value, ttl)
+	if l2Err != nil {
+		c.degradeLocked(l2Err, false)
+		return false, c.unavailableError()
+	}
+	if !added {
+		return false, nil
+	}
+
+	// Redis has committed. Errors from the remaining local/coherence steps must
+	// not make callers repeat Add and accidentally change the result later.
+	c.mutationVersion.Add(1)
+	remaining := time.Until(deadline)
+	var l1Stored bool
+	var l1Err error
+	if remaining > 0 {
+		l1Stored, l1Err = c.l1.Set(key, value, remaining)
+	} else {
+		_, l1Err = c.l1.Forget(key)
+		l1Stored = true
+	}
+	if l1Err == nil && !l1Stored {
+		l1Err = errL1MutationNotStored
+	}
+	l1Err = c.reconcileL1MutationErrorLocked(l1Err)
+
+	publishErr := c.publishKeyInvalidation(key)
+	if publishErr != nil {
+		c.markPendingInvalidation(key)
+		c.degradeLocked(publishErr, true)
+	}
+	if l1Err != nil || publishErr != nil {
+		postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+		return true, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
+	}
+	return true, nil
+}
+
 func (c *TieredCache) Forever(key string, value []byte) (bool, error) {
 	if value == nil {
 		return false, cachecontract.ErrNilValue

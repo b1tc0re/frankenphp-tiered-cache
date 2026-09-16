@@ -4,6 +4,12 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_MASK_EX(arginfo_franken_cache_tiered_get, 0, 1, 
     ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_franken_cache_tiered_add, 0, 3, _IS_BOOL, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, ttl, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_franken_cache_tiered_set, 0, 3, _IS_BOOL, 0)
     ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
@@ -38,6 +44,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_franken_cache_tiered_decrement, 
 ZEND_END_ARG_INFO()
 
 ZEND_FUNCTION(franken_cache_tiered_get);
+ZEND_FUNCTION(franken_cache_tiered_add);
 ZEND_FUNCTION(franken_cache_tiered_set);
 ZEND_FUNCTION(franken_cache_tiered_forever);
 ZEND_FUNCTION(franken_cache_tiered_forget);
@@ -48,6 +55,7 @@ ZEND_FUNCTION(franken_cache_tiered_decrement);
 
 static const zend_function_entry franken_cache_functions[] = {
     ZEND_FE(franken_cache_tiered_get, arginfo_franken_cache_tiered_get)
+    ZEND_FE(franken_cache_tiered_add, arginfo_franken_cache_tiered_add)
     ZEND_FE(franken_cache_tiered_set, arginfo_franken_cache_tiered_set)
     ZEND_FE(franken_cache_tiered_forever, arginfo_franken_cache_tiered_forever)
     ZEND_FE(franken_cache_tiered_forget, arginfo_franken_cache_tiered_forget)

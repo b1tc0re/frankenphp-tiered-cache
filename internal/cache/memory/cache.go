@@ -117,6 +117,62 @@ func (c *MemoryCache) Get(key string) ([]byte, time.Duration, error) {
 	return value, ttl, nil
 }
 
+// Add stores value with expiration only when key is absent. The existence
+// check and insertion are performed under the shard lock, so concurrent Add
+// calls for one key cannot both succeed.
+func (c *MemoryCache) Add(key string, value []byte, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+	if value == nil {
+		return false, cachecontract.ErrNilValue
+	}
+
+	cost := itemCost(key, value)
+	if cost > c.maxItemSize {
+		return false, fmt.Errorf(
+			"%w: item size %d bytes exceeds limit %d bytes",
+			cachecontract.ErrItemTooLarge,
+			cost,
+			c.maxItemSize,
+		)
+	}
+
+	shard := c.shardFor(key)
+	for {
+		shard.mu.Lock()
+		now := c.now()
+		if old := shard.entries[key]; old != nil {
+			if !isExpired(old.expiresAt, now) {
+				shard.mu.Unlock()
+				return false, nil
+			}
+
+			delete(shard.entries, key)
+			c.current.Add(-old.cost)
+		}
+
+		if c.tryReserve(cost) {
+			entry := &memoryEntry{
+				value:     value,
+				expiresAt: now.Add(ttl),
+				cost:      cost,
+			}
+			c.recordAccess(entry)
+			shard.entries[key] = entry
+			shard.mu.Unlock()
+			return true, nil
+		}
+		shard.mu.Unlock()
+
+		evicted, summary := c.evictFor(cost)
+		c.notifyEviction(summary)
+		if !evicted {
+			return false, nil
+		}
+	}
+}
+
 // Set stores value with expiration without copying it. The caller transfers
 // read-only ownership of value to the cache while the entry remains reachable.
 func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {

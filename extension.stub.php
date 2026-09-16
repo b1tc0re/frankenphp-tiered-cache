@@ -4,6 +4,8 @@
 
 function franken_cache_tiered_get(string $key): string|false {}
 
+function franken_cache_tiered_add(string $key, string $value, int $ttl): bool {}
+
 function franken_cache_tiered_set(string $key, string $value, int $ttl): bool {}
 
 function franken_cache_tiered_forever(string $key, string $value): bool {}

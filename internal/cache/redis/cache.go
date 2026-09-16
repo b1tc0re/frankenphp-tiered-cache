@@ -15,6 +15,7 @@ import (
 type client interface {
 	Get(ctx context.Context, key string) ([]byte, time.Duration, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
 	IncrBy(ctx context.Context, key string, value int64) (int64, error)
 	DecrBy(ctx context.Context, key string, value int64) (int64, error)
 	Del(ctx context.Context, keys ...string) (int64, error)
@@ -46,6 +47,10 @@ func (c redisClient) Get(ctx context.Context, key string) ([]byte, time.Duration
 
 func (c redisClient) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	return c.client.Set(ctx, key, value, ttl).Err()
+}
+
+func (c redisClient) SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	return c.client.SetNX(ctx, key, value, ttl).Result()
 }
 
 func (c redisClient) IncrBy(ctx context.Context, key string, value int64) (int64, error) {
@@ -129,6 +134,19 @@ func (c *RedisCache) Set(key string, value []byte, ttl time.Duration) (bool, err
 
 	err := c.client.Set(context.Background(), c.prefixedKey(key), value, ttl)
 	return err == nil, err
+}
+
+// Add stores value only when key does not already exist. Redis SET NX keeps
+// the existence check and write atomic and applies the requested TTL.
+func (c *RedisCache) Add(key string, value []byte, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+	if value == nil {
+		return false, cachecontract.ErrNilValue
+	}
+
+	return c.client.SetNX(context.Background(), c.prefixedKey(key), value, ttl)
 }
 
 func (c *RedisCache) Forever(key string, value []byte) (bool, error) {

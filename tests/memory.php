@@ -17,6 +17,7 @@ function expect_true(bool $condition, string $message): void
 
 $functions = [
     'franken_cache_tiered_get',
+    'franken_cache_tiered_add',
     'franken_cache_tiered_set',
     'franken_cache_tiered_forever',
     'franken_cache_tiered_forget',
@@ -33,6 +34,9 @@ foreach ($functions as $function) {
 expect_true(franken_cache_tiered_flush(), 'Initial TieredCache flush failed.');
 expect_true(franken_cache_tiered_get('missing') === false, 'Cache miss must return false.');
 expect_true(franken_cache_tiered_touch('missing', 60) === false, 'Touch must return false for a missing key.');
+expect_true(franken_cache_tiered_add('add', 'value', 60), 'Add failed for a missing key.');
+expect_true(franken_cache_tiered_add('add', 'new', 60) === false, 'Add overwrote an existing key.');
+expect_true(franken_cache_tiered_get('add') === 'value', 'Add changed the existing value.');
 
 try {
     franken_cache_tiered_set('invalid-ttl', 'value', 0);

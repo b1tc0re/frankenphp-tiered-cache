@@ -302,6 +302,62 @@ func TestTieredCacheCounterReturnsCommittedValueOnPublishFailure(t *testing.T) {
 	waitForInvalidationCondition(t, func() bool { return cacheA.unavailableError() == nil })
 }
 
+func TestTieredCacheAddPublishFailureKeepsCommittedValueAndRecovers(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
+	l1B.put("key", []byte("stale"), time.Minute)
+	config := Config{RecoveryInterval: 5 * time.Millisecond}
+	cacheA := newTestTieredCacheWithInvalidationConfig(t, config, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidationConfig(t, config, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool { return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load() })
+
+	wantErr := errors.New("Pub/Sub unavailable")
+	bus.setPublishError(wantErr)
+	added, err := cacheA.Add("key", []byte("value"), time.Minute)
+	if !added || !errors.Is(err, ErrPostCommit) || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("Add() = (%t, %v), want committed true and post-commit publish error", added, err)
+	}
+	if value, _, getErr := l2.Get("key"); getErr != nil || string(value) != "value" {
+		t.Fatalf("L2 after publish failure = (%q, %v), want value", value, getErr)
+	}
+	if !cacheA.pendingInvalidation("key") {
+		t.Fatal("pending Add invalidation was not retained")
+	}
+
+	bus.setPublishError(nil)
+	waitForInvalidationCondition(t, func() bool {
+		value, _, err := l1B.Get("key")
+		return err == nil && value == nil
+	})
+	waitForInvalidationCondition(t, func() bool { return cacheA.unavailableError() == nil })
+}
+
+func TestTieredCacheRejectedAddDoesNotPublishInvalidation(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
+	l2.put("key", []byte("old"), time.Minute)
+	cacheA := newTestTieredCacheWithInvalidation(t, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidation(t, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool { return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load() })
+	warmCache(t, cacheA, "old")
+	warmCache(t, cacheB, "old")
+	version := cacheA.mutationVersion.Load()
+
+	added, err := cacheA.Add("key", []byte("new"), time.Minute)
+	if err != nil || added {
+		t.Fatalf("Add(existing) = (%t, %v), want (false, nil)", added, err)
+	}
+	if got := cacheA.mutationVersion.Load(); got != version {
+		t.Fatalf("mutationVersion after rejected Add() = %d, want %d", got, version)
+	}
+	if got := bus.publishCount(); got != 0 {
+		t.Fatalf("Pub/Sub publishes after rejected Add() = %d, want 0", got)
+	}
+	if value, _, getErr := l1B.Get("key"); getErr != nil || string(value) != "old" {
+		t.Fatalf("peer L1 after rejected Add() = (%q, %v), want old value", value, getErr)
+	}
+}
+
 func TestTieredCachePublishFailureForFlushDoesNotRepeatRedisFlush(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
@@ -397,6 +453,7 @@ type fakeInvalidationBus struct {
 	delayOrigin  string
 	delayStarted chan struct{}
 	delayRelease chan struct{}
+	publishCalls int
 	closed       bool
 }
 
@@ -413,6 +470,7 @@ func (b *fakeInvalidationBus) Publish(ctx context.Context, event cacheinvalidati
 		b.mu.Unlock()
 		return errors.New("fake invalidation bus: closed")
 	}
+	b.publishCalls++
 	if b.publishErr != nil {
 		err := b.publishErr
 		b.mu.Unlock()
@@ -500,6 +558,12 @@ func (b *fakeInvalidationBus) setPublishError(err error) {
 	b.mu.Lock()
 	b.publishErr = err
 	b.mu.Unlock()
+}
+
+func (b *fakeInvalidationBus) publishCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.publishCalls
 }
 
 func (b *fakeInvalidationBus) disconnect(err error) {

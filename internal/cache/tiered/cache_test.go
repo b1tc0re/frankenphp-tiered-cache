@@ -197,6 +197,98 @@ func TestTieredCacheRedisSetErrorDoesNotChangeL1(t *testing.T) {
 	}
 }
 
+func TestTieredCacheAddUpdatesBothLevelsAfterRedisCommit(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	added, err := cache.Add("key", []byte("value"), time.Minute)
+	if err != nil || !added {
+		t.Fatalf("Add() = (%t, %v), want (true, nil)", added, err)
+	}
+	if value, ttl, err := l2.Get("key"); err != nil || string(value) != "value" || ttl != time.Minute {
+		t.Fatalf("L2 after Add() = (%q, %v, %v), want (value, %v, nil)", value, ttl, err, time.Minute)
+	}
+	if value, ttl, err := l1.Get("key"); err != nil || string(value) != "value" || ttl <= 0 || ttl > time.Minute {
+		t.Fatalf("L1 after Add() = (%q, %v, %v), want value with remaining TTL", value, ttl, err)
+	}
+}
+
+func TestTieredCacheRejectedAddDoesNotChangeL1OrMutationVersion(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("key", []byte("old"), time.Minute)
+	l2 := newFakeCache()
+	l2.put("key", []byte("old"), time.Minute)
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+	version := cache.mutationVersion.Load()
+
+	added, err := cache.Add("key", []byte("new"), 2*time.Minute)
+	if err != nil || added {
+		t.Fatalf("Add(existing) = (%t, %v), want (false, nil)", added, err)
+	}
+	if got := cache.mutationVersion.Load(); got != version {
+		t.Fatalf("mutationVersion after rejected Add() = %d, want %d", got, version)
+	}
+	if got := l1.setCount(); got != 0 {
+		t.Fatalf("L1 Set() calls after rejected Add() = %d, want 0", got)
+	}
+	if value, _, err := l1.Get("key"); err != nil || string(value) != "old" {
+		t.Fatalf("L1 after rejected Add() = (%q, %v), want old value", value, err)
+	}
+}
+
+func TestTieredCacheAddUsesRemainingTTLForL1(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.addDelay = 50 * time.Millisecond
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	const ttl = time.Second
+	added, err := cache.Add("key", []byte("value"), ttl)
+	if err != nil || !added {
+		t.Fatalf("Add() = (%t, %v), want (true, nil)", added, err)
+	}
+	_, l1TTL, err := l1.Get("key")
+	if err != nil {
+		t.Fatalf("L1 Get() error = %v", err)
+	}
+	if l1TTL <= 0 || l1TTL >= ttl-25*time.Millisecond {
+		t.Fatalf("L1 TTL after delayed Add() = %v, want reduced positive TTL", l1TTL)
+	}
+}
+
+func TestTieredCacheAddRedisFailureDegradesWithoutChangingL1(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("key", []byte("old"), time.Minute)
+	l2 := newFakeCache()
+	wantErr := errors.New("Redis unavailable")
+	l2.addErr = wantErr
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	added, err := cache.Add("key", []byte("new"), time.Minute)
+	if added || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("Add() = (%t, %v), want false and unavailable Redis error", added, err)
+	}
+	if value, _, getErr := l1.Get("key"); getErr != nil || string(value) != "old" {
+		t.Fatalf("L1 after Redis Add() failure = (%q, %v), want old value", value, getErr)
+	}
+}
+
+func TestTieredCacheAddReturnsCommittedResultOnL1Failure(t *testing.T) {
+	l1 := newFakeCache()
+	l1.setErr = errors.New("L1 unavailable")
+	l2 := newFakeCache()
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	added, err := cache.Add("key", []byte("value"), time.Minute)
+	if !added || !errors.Is(err, ErrPostCommit) || !errors.Is(err, l1.setErr) {
+		t.Fatalf("Add() = (%t, %v), want true and post-commit L1 error", added, err)
+	}
+	if value, _, getErr := l2.Get("key"); getErr != nil || string(value) != "value" {
+		t.Fatalf("L2 after L1 Add() failure = (%q, %v), want value", value, getErr)
+	}
+}
+
 func TestTieredCacheRedisFailureRecoveryClearsL1BeforeHealthy(t *testing.T) {
 	l1 := newFakeCache()
 	l1.put("key", []byte("old"), time.Minute)
@@ -472,6 +564,7 @@ type fakeCache struct {
 
 	getErr     error
 	setErr     error
+	addErr     error
 	incrErr    error
 	decrErr    error
 	forgetErr  error
@@ -480,6 +573,7 @@ type fakeCache struct {
 	closeErr   error
 	getDelay   time.Duration
 	setDelay   time.Duration
+	addDelay   time.Duration
 	touchDelay time.Duration
 
 	getStarted  chan struct{}
@@ -538,6 +632,24 @@ func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 		return nil, 0, nil
 	}
 	return value, ttl, nil
+}
+
+func (f *fakeCache) Add(key string, value []byte, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.addDelay > 0 {
+		time.Sleep(f.addDelay)
+	}
+	if f.addErr != nil {
+		return false, f.addErr
+	}
+	if _, exists := f.values[key]; exists {
+		return false, nil
+	}
+	f.values[key] = append([]byte(nil), value...)
+	f.ttls[key] = ttl
+	return true, nil
 }
 
 func (f *fakeCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {

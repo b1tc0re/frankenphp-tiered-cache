@@ -59,6 +59,28 @@ func TestRedisCacheSetGetAndForever(t *testing.T) {
 	}
 }
 
+func TestRedisCacheAddUsesAtomicSetNX(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	if ok, err := cache.Add("key", []byte("value"), time.Minute); err != nil || !ok {
+		t.Fatalf("Add(missing) = (%t, %v), want (true, nil)", ok, err)
+	}
+	if value, ttl, err := cache.Get("key"); err != nil || string(value) != "value" || ttl != time.Minute {
+		t.Fatalf("Get() after Add() = (%q, %v, %v), want (value, %v, nil)", value, ttl, err, time.Minute)
+	}
+
+	if ok, err := cache.Add("key", []byte("new"), 2*time.Minute); err != nil || ok {
+		t.Fatalf("Add(existing) = (%t, %v), want (false, nil)", ok, err)
+	}
+	if value, ttl, err := cache.Get("key"); err != nil || string(value) != "value" || ttl != time.Minute {
+		t.Fatalf("Get() after rejected Add() = (%q, %v, %v), want (value, %v, nil)", value, ttl, err, time.Minute)
+	}
+	if client.setNXCalls != 2 || client.setCalls != 0 {
+		t.Fatalf("Redis calls = (SetNX=%d, Set=%d), want (2, 0)", client.setNXCalls, client.setCalls)
+	}
+}
+
 func TestRedisCacheRejectsInvalidValuesAndTTL(t *testing.T) {
 	cache := newWithClient(newFakeClient(), "test:")
 
@@ -75,6 +97,16 @@ func TestRedisCacheRejectsInvalidValuesAndTTL(t *testing.T) {
 		{
 			name: "set invalid ttl",
 			call: func() (bool, error) { return cache.Set("key", []byte("value"), 0) },
+			want: cachecontract.ErrInvalidTTL,
+		},
+		{
+			name: "add nil value",
+			call: func() (bool, error) { return cache.Add("key", nil, time.Minute) },
+			want: cachecontract.ErrNilValue,
+		},
+		{
+			name: "add invalid ttl",
+			call: func() (bool, error) { return cache.Add("key", []byte("value"), 0) },
 			want: cachecontract.ErrInvalidTTL,
 		},
 		{
@@ -356,6 +388,7 @@ type fakeClient struct {
 
 	getErr    error
 	setErr    error
+	setNXErr  error
 	incrErr   error
 	decrErr   error
 	delErr    error
@@ -363,6 +396,8 @@ type fakeClient struct {
 	scanErr   error
 	closeErr  error
 
+	setCalls   int
+	setNXCalls int
 	closeCalls int
 }
 
@@ -397,6 +432,7 @@ func (f *fakeClient) Get(_ context.Context, key string) ([]byte, time.Duration, 
 func (f *fakeClient) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.setCalls++
 
 	if f.setErr != nil {
 		return f.setErr
@@ -404,6 +440,22 @@ func (f *fakeClient) Set(_ context.Context, key string, value []byte, ttl time.D
 	f.values[key] = append([]byte(nil), value...)
 	f.ttls[key] = ttl
 	return nil
+}
+
+func (f *fakeClient) SetNX(_ context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setNXCalls++
+
+	if f.setNXErr != nil {
+		return false, f.setNXErr
+	}
+	if _, exists := f.values[key]; exists {
+		return false, nil
+	}
+	f.values[key] = append([]byte(nil), value...)
+	f.ttls[key] = ttl
+	return true, nil
 }
 
 func (f *fakeClient) IncrBy(_ context.Context, key string, value int64) (int64, error) {

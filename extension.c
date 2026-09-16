@@ -32,6 +32,32 @@ PHP_FUNCTION(franken_cache_tiered_get)
     RETURN_STR(value);
 }
 
+PHP_FUNCTION(franken_cache_tiered_add)
+{
+    zend_string *key;
+    zend_string *value;
+    zend_long ttl;
+
+    ZEND_PARSE_PARAMETERS_START(3, 3)
+        Z_PARAM_STR(key)
+        Z_PARAM_STR(value)
+        Z_PARAM_LONG(ttl)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (ttl <= 0) {
+        zend_value_error("ttl must be greater than zero");
+        RETURN_THROWS();
+    }
+
+    int result = franken_cache_tiered_add_go(key, value, ttl);
+    if (result < 0) {
+        franken_cache_throw_tiered_error();
+        RETURN_THROWS();
+    }
+
+    RETURN_BOOL(result);
+}
+
 PHP_FUNCTION(franken_cache_tiered_set)
 {
     zend_string *key;

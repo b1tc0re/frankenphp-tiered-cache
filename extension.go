@@ -120,6 +120,24 @@ func franken_cache_tiered_get_go(key *C.zend_string, status *C.int) *C.zend_stri
 	return (*C.zend_string)(frankenphp.PHPString(valueString, false))
 }
 
+//export franken_cache_tiered_add_go
+func franken_cache_tiered_add_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
+	ttl, ok := phpTTL(ttlSeconds)
+	if !ok {
+		return -1
+	}
+
+	added, err := phpTieredCache.Add(
+		frankenphp.GoString(unsafe.Pointer(key)),
+		phpBytes(value),
+		ttl,
+	)
+	if err != nil && !errors.Is(err, tieredcache.ErrPostCommit) {
+		return -1
+	}
+	return phpBoolResult(added, nil)
+}
+
 //export franken_cache_tiered_set_go
 func franken_cache_tiered_set_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)

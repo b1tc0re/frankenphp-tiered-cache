@@ -50,6 +50,69 @@ func TestMemoryCacheSetGetZeroCopy(t *testing.T) {
 	}
 }
 
+func TestMemoryCacheAddIsAtomicAndDoesNotOverwrite(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+	value := []byte("value")
+
+	if stored, err := cache.Add("key", value, time.Minute); err != nil || !stored {
+		t.Fatalf("Add(missing) = (%t, %v), want (true, nil)", stored, err)
+	}
+	if stored, err := cache.Add("key", []byte("new"), 2*time.Minute); err != nil || stored {
+		t.Fatalf("Add(existing) = (%t, %v), want (false, nil)", stored, err)
+	}
+	if got, ttl, err := cache.Get("key"); err != nil || string(got) != "value" || ttl <= 0 || ttl > time.Minute {
+		t.Fatalf("Get() after rejected Add() = (%q, %v, %v), want original value and TTL", got, ttl, err)
+	}
+}
+
+func TestMemoryCacheAddTreatsExpiredKeyAsMissing(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+	now := time.Unix(100, 0)
+	cache.now = func() time.Time { return now }
+
+	if stored, err := cache.Add("key", []byte("old"), time.Second); err != nil || !stored {
+		t.Fatalf("first Add() = (%t, %v), want (true, nil)", stored, err)
+	}
+	now = now.Add(time.Second)
+	if stored, err := cache.Add("key", []byte("new"), time.Minute); err != nil || !stored {
+		t.Fatalf("Add(expired) = (%t, %v), want (true, nil)", stored, err)
+	}
+	if got, _, err := cache.Get("key"); err != nil || string(got) != "new" {
+		t.Fatalf("Get() after Add(expired) = (%q, %v), want new value", got, err)
+	}
+}
+
+func TestMemoryCacheConcurrentAddOneWinner(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+	const workers = 32
+
+	var wg sync.WaitGroup
+	results := make(chan bool, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stored, err := cache.Add("key", []byte("value"), time.Minute)
+			if err != nil {
+				t.Errorf("Add() error = %v", err)
+			}
+			results <- stored
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	winners := 0
+	for stored := range results {
+		if stored {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("successful Add() calls = %d, want 1", winners)
+	}
+}
+
 func TestMemoryCacheAllowsEmptyNonNilValue(t *testing.T) {
 	cache := newTestMemoryCache(t, Config{})
 	value := make([]byte, 0)
@@ -228,6 +291,9 @@ func TestMemoryCacheRejectsInvalidTTL(t *testing.T) {
 	if touched, err := cache.Touch("key", -time.Second); touched || !errors.Is(err, cachecontract.ErrInvalidTTL) {
 		t.Fatalf("Touch() = %v, %v; want false, ErrInvalidTTL", touched, err)
 	}
+	if stored, err := cache.Add("key", []byte("value"), 0); stored || !errors.Is(err, cachecontract.ErrInvalidTTL) {
+		t.Fatalf("Add() = %v, %v; want false, ErrInvalidTTL", stored, err)
+	}
 }
 
 func TestMemoryCacheRejectsNilValue(t *testing.T) {
@@ -238,6 +304,9 @@ func TestMemoryCacheRejectsNilValue(t *testing.T) {
 	}
 	if stored, err := cache.Forever("key", nil); stored || !errors.Is(err, cachecontract.ErrNilValue) {
 		t.Fatalf("Forever(nil) = %v, %v; want false, ErrNilValue", stored, err)
+	}
+	if stored, err := cache.Add("key", nil, time.Minute); stored || !errors.Is(err, cachecontract.ErrNilValue) {
+		t.Fatalf("Add(nil) = %v, %v; want false, ErrNilValue", stored, err)
 	}
 }
 
@@ -250,6 +319,10 @@ func TestMemoryCacheRejectsOversizedItem(t *testing.T) {
 	stored, err := cache.Forever("key", make([]byte, 254))
 	if stored || !errors.Is(err, cachecontract.ErrItemTooLarge) {
 		t.Fatalf("Forever(oversized) = %v, %v; want false, ErrItemTooLarge", stored, err)
+	}
+	stored, err = cache.Add("key", make([]byte, 254), time.Minute)
+	if stored || !errors.Is(err, cachecontract.ErrItemTooLarge) {
+		t.Fatalf("Add(oversized) = %v, %v; want false, ErrItemTooLarge", stored, err)
 	}
 }
 
