@@ -2,6 +2,8 @@ version: '3'
 
 vars:
   IMAGE: '{{default "frankenphp-tiered-cache:dev" .IMAGE}}'
+  COMPOSE_PROJECT: '{{default "frankenphp-tiered-cache" .COMPOSE_PROJECT}}'
+  REDIS_NETWORK: '{{.COMPOSE_PROJECT}}_default'
 
 tasks:
   default:
@@ -17,11 +19,13 @@ tasks:
       - echo 'Built {{.IMAGE}}'
 
   smoke:
-    desc: Build the image and run extension and MemoryCache PHP bridge smoke tests
+    desc: Build the image and run extension and TieredCache PHP smoke tests
+    deps:
+      - redis:up
     cmds:
       - task: build
-      - docker run --rm --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
-      - docker run --rm --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
+      - docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
+      - docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
 
   test:
     desc: Run Go cache tests
@@ -36,12 +40,12 @@ tasks:
   redis:up:
     desc: Start the Redis service for integration tests
     cmds:
-      - docker compose up -d --wait redis
+      - docker compose -p '{{.COMPOSE_PROJECT}}' up -d --wait redis
 
   redis:down:
     desc: Stop the Redis service used by integration tests
     cmds:
-      - docker compose down --remove-orphans
+      - docker compose -p '{{.COMPOSE_PROJECT}}' down --remove-orphans
 
   test:integration:
     desc: Run the real Redis Pub/Sub integration test
@@ -49,6 +53,51 @@ tasks:
       - redis:up
     cmds:
       - REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+
+  bench:laravel:config:
+    desc: Validate the Laravel benchmark Compose files
+    cmds:
+      - make -C bench/laravel config
+
+  bench:laravel:local-up:
+    desc: Build and start the local resource-limited Laravel benchmark stand
+    cmds:
+      - make -C bench/laravel local-up
+
+  bench:laravel:local:
+    desc: Run the Laravel cache comparison against the local Redis baseline
+    cmds:
+      - make -C bench/laravel local-bench
+
+  bench:laravel:two-pod:
+    desc: Verify shared Redis reads and cross-pod L1 invalidation
+    cmds:
+      - make -C bench/laravel local-two-pod
+
+  bench:laravel:local-down:
+    desc: Stop the local Laravel benchmark stand
+    cmds:
+      - make -C bench/laravel local-down
+
+  bench:laravel:remote-up:
+    desc: Build and start the benchmark pods against an external Redis
+    cmds:
+      - make -C bench/laravel remote-up
+
+  bench:laravel:remote:
+    desc: Run the Laravel cache comparison against an external Redis
+    cmds:
+      - make -C bench/laravel remote-bench
+
+  bench:laravel:remote-two-pod:
+    desc: Verify two-pod behavior against an external Redis
+    cmds:
+      - make -C bench/laravel remote-two-pod
+
+  bench:laravel:remote-down:
+    desc: Stop the benchmark pods without touching an external Redis
+    cmds:
+      - make -C bench/laravel remote-down
 
   bench:get:
     desc: Measure production MemoryCache Get contention across same and distinct keys
