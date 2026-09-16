@@ -6,6 +6,7 @@ package frankencache
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -172,7 +173,7 @@ func franken_cache_tiered_increment_go(key *C.zend_string, value C.zend_long, re
 		frankenphp.GoString(unsafe.Pointer(key)),
 		int64(value),
 	)
-	if err != nil {
+	if err != nil && !errors.Is(err, tieredcache.ErrPostCommit) {
 		return -1
 	}
 
@@ -186,7 +187,7 @@ func franken_cache_tiered_decrement_go(key *C.zend_string, value C.zend_long, re
 		frankenphp.GoString(unsafe.Pointer(key)),
 		int64(value),
 	)
-	if err != nil {
+	if err != nil && !errors.Is(err, tieredcache.ErrPostCommit) {
 		return -1
 	}
 

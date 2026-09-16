@@ -272,6 +272,36 @@ func TestTieredCachePublishFailureKeepsRedisAndRecoversPendingInvalidation(t *te
 	}
 }
 
+func TestTieredCacheCounterReturnsCommittedValueOnPublishFailure(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
+	l2.put("counter", []byte("10"), time.Minute)
+	config := Config{RecoveryInterval: 5 * time.Millisecond}
+	cacheA := newTestTieredCacheWithInvalidationConfig(t, config, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidationConfig(t, config, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool { return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load() })
+	if value, _, err := cacheB.Get("counter"); err != nil || string(value) != "10" {
+		t.Fatalf("peer warm Get() = (%q, %v), want (10, nil)", value, err)
+	}
+
+	wantErr := errors.New("Pub/Sub unavailable")
+	bus.setPublishError(wantErr)
+	got, err := cacheA.Increment("counter", 1)
+	if got != 11 || !errors.Is(err, ErrPostCommit) || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("Increment() = (%d, %v), want committed value 11 and post-commit publish error", got, err)
+	}
+	if !cacheA.pendingInvalidation("counter") {
+		t.Fatal("pending counter invalidation was not retained")
+	}
+
+	bus.setPublishError(nil)
+	waitForInvalidationCondition(t, func() bool {
+		value, _, err := l1B.Get("counter")
+		return err == nil && value == nil
+	})
+	waitForInvalidationCondition(t, func() bool { return cacheA.unavailableError() == nil })
+}
+
 func TestTieredCachePublishFailureForFlushDoesNotRepeatRedisFlush(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()

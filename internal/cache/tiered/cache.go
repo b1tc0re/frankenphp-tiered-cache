@@ -35,6 +35,7 @@ const (
 )
 
 var errL1MutationNotStored = errors.New("tiered cache: L1 mutation was not stored")
+var errL1FlushNotCompleted = errors.New("tiered cache: L1 flush was not completed")
 
 // TieredCache uses Redis as the authoritative store and MemoryCache as a
 // local read-through cache. Mutations change Redis first, then update L1 and
@@ -196,11 +197,36 @@ func (c *TieredCache) flushL1Locked() {
 		return
 	}
 
-	_, flushErr := c.l1.Flush()
+	_, flushErr := flushL1(c.l1)
 	if flushErr != nil {
 		c.stateErrMu.Lock()
 		c.stateErr = errors.Join(c.stateErr, flushErr)
 		c.stateErrMu.Unlock()
+	}
+}
+
+func flushL1(l1 cachecontract.Cache) (bool, error) {
+	flushed, err := l1.Flush()
+	if err == nil && !flushed {
+		err = errL1FlushNotCompleted
+	}
+	return flushed, err
+}
+
+// reconcileL1MutationErrorLocked retries the local invalidation by flushing
+// L1. If that safety fallback also fails, the local cache can no longer be
+// trusted and the TieredCache must remain degraded.
+func (c *TieredCache) reconcileL1MutationErrorLocked(l1Err error) error {
+	if l1Err == nil {
+		return nil
+	}
+
+	if _, flushErr := flushL1(c.l1); flushErr == nil {
+		return l1Err
+	} else {
+		combinedErr := errors.Join(l1Err, flushErr)
+		c.degradeLocked(combinedErr, false)
+		return combinedErr
 	}
 }
 
@@ -328,7 +354,7 @@ func (c *TieredCache) tryRecovery() {
 		c.mutationMu.Unlock()
 		return
 	}
-	_, flushErr := c.l1.Flush()
+	_, flushErr := flushL1(c.l1)
 	c.mutationMu.Unlock()
 	if flushErr != nil {
 		return
@@ -448,7 +474,7 @@ func (c *TieredCache) flushLocalL1() error {
 		return ErrClosed
 	}
 	c.mutationVersion.Add(1)
-	_, err := c.l1.Flush()
+	_, err := flushL1(c.l1)
 	return err
 }
 
@@ -468,7 +494,7 @@ func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
 
 	c.mutationVersion.Add(1)
 	if event.Type == cacheinvalidation.EventTypeFlush {
-		_, err := c.l1.Flush()
+		_, err := flushL1(c.l1)
 		return err
 	}
 	_, err := c.l1.Forget(event.Key)
@@ -623,10 +649,7 @@ func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (in
 	// callers do not repeat a mutation that already changed the counter.
 	c.mutationVersion.Add(1)
 	_, l1Err := c.l1.Forget(key)
-	if l1Err != nil {
-		_, flushErr := c.l1.Flush()
-		l1Err = errors.Join(l1Err, flushErr)
-	}
+	l1Err = c.reconcileL1MutationErrorLocked(l1Err)
 
 	publishErr := c.publishKeyInvalidation(key)
 	if publishErr != nil {
@@ -634,7 +657,11 @@ func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (in
 		c.degradeLocked(publishErr, true)
 	}
 
-	return result, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
+	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	if postCommitErr != nil {
+		return result, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
+	}
+	return result, nil
 }
 
 func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever bool) (bool, error) {
@@ -687,10 +714,7 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 	if l1Err == nil && !l1Stored {
 		l1Err = errL1MutationNotStored
 	}
-	if l1Err != nil {
-		_, flushErr := c.l1.Flush()
-		l1Err = errors.Join(l1Err, flushErr)
-	}
+	l1Err = c.reconcileL1MutationErrorLocked(l1Err)
 
 	publishErr := c.publishKeyInvalidation(key)
 	if publishErr != nil {
@@ -721,16 +745,13 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 	}
 	c.mutationVersion.Add(1)
 	l1Removed, l1Err := c.l1.Forget(key)
-	if l1Err != nil {
-		_, flushErr := c.l1.Flush()
-		l1Err = errors.Join(l1Err, flushErr)
-	}
+	l1Err = c.reconcileL1MutationErrorLocked(l1Err)
 	publishErr := c.publishKeyInvalidation(key)
 	if publishErr != nil {
 		c.markPendingInvalidation(key)
 		c.degradeLocked(publishErr, true)
 	}
-	return l1Removed || l2Removed, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
+	return l1Removed || l2Removed, errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
 }
 
 func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
@@ -769,15 +790,14 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		l1Touched, l1Err = c.l1.Forget(key)
 	}
 	if l1Err != nil {
-		_, flushErr := c.l1.Flush()
-		l1Err = errors.Join(l1Err, flushErr)
+		l1Err = c.reconcileL1MutationErrorLocked(l1Err)
 	}
 	publishErr := c.publishKeyInvalidation(key)
 	if publishErr != nil {
 		c.markPendingInvalidation(key)
 		c.degradeLocked(publishErr, true)
 	}
-	return l2Touched || l1Touched, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
+	return l2Touched || l1Touched, errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
 }
 
 func (c *TieredCache) Flush() (bool, error) {
@@ -797,13 +817,16 @@ func (c *TieredCache) Flush() (bool, error) {
 		return false, c.unavailableError()
 	}
 	c.mutationVersion.Add(1)
-	l1Flushed, l1Err := c.l1.Flush()
+	l1Flushed, l1Err := flushL1(c.l1)
+	if l1Err != nil {
+		c.degradeLocked(l1Err, false)
+	}
 	publishErr := c.publishFlushInvalidation()
 	if publishErr != nil {
 		c.markPendingFlush()
 		c.degradeLocked(publishErr, true)
 	}
-	return l1Flushed && l2Flushed && l1Err == nil && publishErr == nil, errors.Join(l1Err, c.unavailableErrorIf(publishErr))
+	return l1Flushed && l2Flushed && l1Err == nil && publishErr == nil, errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
 }
 
 func (c *TieredCache) unavailableErrorIf(operationErr error) error {

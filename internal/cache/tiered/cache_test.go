@@ -235,6 +235,27 @@ func TestTieredCacheCommittedRedisValueSurvivesL1Failure(t *testing.T) {
 	}
 }
 
+func TestTieredCacheL1CleanupFailureDegradesAfterCommittedMutation(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("key", []byte("old"), time.Minute)
+	l1.setErr = errors.New("L1 unavailable")
+	l1.flushErr = errors.New("L1 flush unavailable")
+	l2 := newFakeCache()
+	l2.put("key", []byte("old"), time.Minute)
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	ok, err := cache.Set("key", []byte("new"), time.Minute)
+	if !ok || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, l1.setErr) || !errors.Is(err, l1.flushErr) {
+		t.Fatalf("Set() = (%t, %v), want committed value with degraded error", ok, err)
+	}
+	if healthErr := cache.unavailableError(); healthErr == nil {
+		t.Fatal("cache health after failed L1 cleanup = healthy, want degraded")
+	}
+	if value, _, getErr := l1.Get("key"); getErr != nil || string(value) != "old" {
+		t.Fatalf("L1 after failed cleanup = (%q, %v), want stale old value retained but inaccessible through TieredCache", value, getErr)
+	}
+}
+
 func TestTieredCacheSynchronousMutationsUseBothLevels(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
@@ -295,11 +316,50 @@ func TestTieredCacheCounterReturnsCommittedValueWhenL1InvalidationFails(t *testi
 	cache := newTestTieredCache(t, Config{}, l1, l2)
 
 	got, err := cache.Increment("counter", 1)
-	if got != 11 || !errors.Is(err, wantErr) {
-		t.Fatalf("Increment() = (%d, %v), want committed value 11 and L1 error", got, err)
+	if got != 11 || !errors.Is(err, ErrPostCommit) || !errors.Is(err, wantErr) {
+		t.Fatalf("Increment() = (%d, %v), want committed value 11 and post-commit L1 error", got, err)
 	}
 	if value, _, getErr := l2.Get("counter"); getErr != nil || string(value) != "11" {
 		t.Fatalf("L2 after failed L1 invalidation = (%q, %v), want (11, nil)", value, getErr)
+	}
+}
+
+func TestTieredCacheCommittedZeroCounterIsPostCommit(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l1.put("counter", []byte("1"), time.Minute)
+	l2.put("counter", []byte("1"), time.Minute)
+	wantErr := errors.New("L1 unavailable")
+	l1.forgetErr = wantErr
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	got, err := cache.Decrement("counter", 1)
+	if got != 0 || !errors.Is(err, ErrPostCommit) || !errors.Is(err, wantErr) {
+		t.Fatalf("Decrement() = (%d, %v), want committed zero and post-commit L1 error", got, err)
+	}
+	if value, _, getErr := l2.Get("counter"); getErr != nil || string(value) != "0" {
+		t.Fatalf("L2 after Decrement() = (%q, %v), want (0, nil)", value, getErr)
+	}
+}
+
+func TestTieredCacheFlushFailureDegradesAfterCommittedRedisFlush(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("key", []byte("stale"), time.Minute)
+	wantErr := errors.New("L1 flush unavailable")
+	l1.flushErr = wantErr
+	l2 := newFakeCache()
+	l2.put("key", []byte("value"), time.Minute)
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	flushed, err := cache.Flush()
+	if flushed || !errors.Is(err, wantErr) || !errors.Is(err, ErrL2Unavailable) {
+		t.Fatalf("Flush() = (%t, %v), want false and degraded L1 error", flushed, err)
+	}
+	if healthErr := cache.unavailableError(); healthErr == nil {
+		t.Fatal("cache health after failed L1 flush = healthy, want degraded")
+	}
+	if value, _, getErr := l1.Get("key"); getErr != nil || string(value) != "stale" {
+		t.Fatalf("L1 after failed Flush() = (%q, %v), want stale value retained but inaccessible through TieredCache", value, getErr)
 	}
 }
 

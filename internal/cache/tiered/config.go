@@ -13,6 +13,7 @@ const (
 var (
 	ErrClosed        = errors.New("tiered cache: cache is closed")
 	ErrL2Unavailable = errors.New("tiered cache: L2 is unavailable")
+	ErrPostCommit    = errors.New("tiered cache: mutation already committed")
 )
 
 // Config contains settings owned by TieredCache.
