@@ -210,6 +210,77 @@ Redis и recovery настраиваются через environment variables:
 Значения timeout и recovery interval задаются в формате Go duration, например
 `500ms` или `5s`.
 
+### Production Docker image
+
+В production расширение подключается во время сборки FrankenPHP через
+`xcaddy`. В вашем существующем multi-stage Dockerfile достаточно добавить
+модуль в тот же `xcaddy build`:
+
+```dockerfile
+ARG FRANKEN_CACHE_VERSION=<release-tag-or-commit>
+
+FROM dunglas/frankenphp:${FRANKENPHP_VERSION}-builder-php${PHP_VERSION} AS upstream
+
+ARG FRANKEN_CACHE_VERSION
+
+COPY --from=caddy:builder /usr/bin/xcaddy /usr/bin/xcaddy
+
+RUN CGO_ENABLED=1 \
+    XCADDY_SETCAP=0 \
+    XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s' -tags=nobadger,nomysql,nopgx" \
+    CGO_CFLAGS="$(php-config --includes)" \
+    CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
+    xcaddy build \
+        --output /usr/local/bin/frankenphp \
+        --with github.com/dunglas/frankenphp=./ \
+        --with github.com/dunglas/frankenphp/caddy=./caddy/ \
+        --with github.com/dunglas/caddy-cbrotli \
+        --with github.com/b1tc0re/frankenphp-tiered-cache@${FRANKEN_CACHE_VERSION}
+
+FROM dunglas/frankenphp:${FRANKENPHP_VERSION}-php${PHP_VERSION}
+
+COPY --from=upstream /usr/local/bin/frankenphp /usr/local/bin/frankenphp
+```
+
+`FRANKEN_CACHE_VERSION` должен быть закреплён на release tag или commit, а не
+на плавающей ветке. Если исходники этого репозитория уже входят в Docker build
+context, вместо versioned module можно использовать локальный путь:
+
+```dockerfile
+COPY frankenphp-tiered-cache /src/frankenphp-tiered-cache
+...
+--with github.com/b1tc0re/frankenphp-tiered-cache=/src/frankenphp-tiered-cache
+```
+
+При запуске контейнера передайте Redis-конфигурацию как runtime environment,
+например в Compose или Kubernetes:
+
+```yaml
+environment:
+  FRANKEN_CACHE_REDIS_ADDR: redis.internal:6379
+  FRANKEN_CACHE_REDIS_DB: "1"
+  FRANKEN_CACHE_REDIS_USERNAME: cache-user
+  FRANKEN_CACHE_REDIS_PASSWORD: ${REDIS_PASSWORD}
+  FRANKEN_CACHE_REDIS_PREFIX: "franken_cache:"
+  FRANKEN_CACHE_RECOVERY_INTERVAL: 5s
+```
+
+Пересборка image при изменении адреса, DB, prefix или credentials не нужна:
+достаточно перезапустить контейнер с новым environment. `ARG` для версии
+FrankenPHP/PHP и модуля относится к build-time, а `FRANKEN_CACHE_*` — только к
+runtime.
+
+После сборки расширение само по себе не меняет Laravel `CACHE_STORE`. PHP
+adapter должен вызывать функции `franken_cache_tiered_*`, а приложение должно
+выбрать этот adapter как свой cache store. PHP `redis` extension может
+оставаться установленным для других задач, но TieredCache подключается к Redis
+самостоятельно из Go.
+
+Текущий Dockerfile этого репозитория проверен с FrankenPHP `1.12.7` и PHP
+`8.4`. Для другой пары версий, например FrankenPHP `1.11`, сначала нужно
+отдельно проверить сборку и smoke-тест: совместимость не следует считать
+автоматически подтверждённой.
+
 ### Redis integration test
 
 Для проверки cross-pod invalidation нужен доступный Redis. Удобный локальный сценарий:
