@@ -612,6 +612,9 @@ func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (in
 		result, l2Err = c.l2.Increment(key, value)
 	}
 	if l2Err != nil {
+		if errors.Is(l2Err, cachecontract.ErrRedisCommand) {
+			return 0, l2Err
+		}
 		c.degradeLocked(l2Err, false)
 		return 0, c.unavailableError()
 	}

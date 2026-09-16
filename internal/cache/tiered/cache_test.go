@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 )
 
 const (
@@ -298,6 +300,39 @@ func TestTieredCacheCounterReturnsCommittedValueWhenL1InvalidationFails(t *testi
 	}
 	if value, _, getErr := l2.Get("counter"); getErr != nil || string(value) != "11" {
 		t.Fatalf("L2 after failed L1 invalidation = (%q, %v), want (11, nil)", value, getErr)
+	}
+}
+
+func TestTieredCacheRedisCommandErrorDoesNotDegrade(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l1.put("counter", []byte("abc"), time.Minute)
+	l2.incrErr = cachecontract.ErrRedisCommand
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	if got, err := cache.Increment("counter", 1); got != 0 || !errors.Is(err, cachecontract.ErrRedisCommand) {
+		t.Fatalf("Increment() = (%d, %v), want (0, ErrRedisCommand)", got, err)
+	}
+	if err := cache.unavailableError(); err != nil {
+		t.Fatalf("cache health after Redis command error = %v, want healthy", err)
+	}
+	if value, _, err := l1.Get("counter"); err != nil || string(value) != "abc" {
+		t.Fatalf("L1 after Redis command error = (%q, %v), want (abc, nil)", value, err)
+	}
+}
+
+func TestTieredCacheCounterTransportErrorDegrades(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	wantErr := errors.New("Redis unavailable")
+	l2.incrErr = wantErr
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	if got, err := cache.Increment("counter", 1); got != 0 || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("Increment() = (%d, %v), want unavailable wrapping transport error", got, err)
+	}
+	if err := cache.unavailableError(); err == nil {
+		t.Fatal("cache health after transport error = healthy, want degraded")
 	}
 }
 

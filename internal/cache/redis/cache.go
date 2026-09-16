@@ -143,13 +143,28 @@ func (c *RedisCache) Forever(key string, value []byte) (bool, error) {
 // Increment atomically increments a signed Redis counter. Redis keeps the
 // existing TTL, or creates a persistent key when the counter is missing.
 func (c *RedisCache) Increment(key string, value int64) (int64, error) {
-	return c.client.IncrBy(context.Background(), c.prefixedKey(key), value)
+	result, err := c.client.IncrBy(context.Background(), c.prefixedKey(key), value)
+	return result, wrapRedisCommandError(err)
 }
 
 // Decrement atomically decrements a signed Redis counter. Redis keeps the
 // existing TTL, or creates a persistent key when the counter is missing.
 func (c *RedisCache) Decrement(key string, value int64) (int64, error) {
-	return c.client.DecrBy(context.Background(), c.prefixedKey(key), value)
+	result, err := c.client.DecrBy(context.Background(), c.prefixedKey(key), value)
+	return result, wrapRedisCommandError(err)
+}
+
+func wrapRedisCommandError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var redisErr goredis.Error
+	if errors.As(err, &redisErr) {
+		return fmt.Errorf("%w: %w", cachecontract.ErrRedisCommand, err)
+	}
+
+	return err
 }
 
 func (c *RedisCache) Forget(key string) (bool, error) {

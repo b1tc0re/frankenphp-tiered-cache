@@ -6,11 +6,12 @@ import (
 )
 
 var (
-	ErrInvalidTTL        = errors.New("cache: ttl must be greater than zero")
-	ErrNilValue          = errors.New("cache: nil value is not allowed")
-	ErrItemTooLarge      = errors.New("cache: item exceeds maximum size")
+	ErrInvalidTTL         = errors.New("cache: ttl must be greater than zero")
+	ErrNilValue           = errors.New("cache: nil value is not allowed")
+	ErrItemTooLarge       = errors.New("cache: item exceeds maximum size")
 	ErrInsufficientMemory = errors.New("cache: insufficient memory")
-	ErrCounterOverflow   = errors.New("cache: counter overflow")
+	ErrCounterOverflow    = errors.New("cache: counter overflow")
+	ErrRedisCommand       = errors.New("cache: Redis command was rejected")
 )
 
 type Cache interface {

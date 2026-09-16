@@ -160,6 +160,21 @@ func TestRedisCacheCounterErrorsArePropagated(t *testing.T) {
 	}
 }
 
+func TestRedisCacheWrapsRedisCommandErrors(t *testing.T) {
+	client := newFakeClient()
+	wantErr := fakeRedisError("ERR arbitrary server error")
+	client.incrErr = wantErr
+	client.decrErr = wantErr
+	cache := newWithClient(client, "test:")
+
+	if _, err := cache.Increment("counter", 1); !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, wantErr) {
+		t.Fatalf("Increment() error = %v, want ErrRedisCommand wrapping the server error", err)
+	}
+	if _, err := cache.Decrement("counter", 1); !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, wantErr) {
+		t.Fatalf("Decrement() error = %v, want ErrRedisCommand wrapping the server error", err)
+	}
+}
+
 func TestRedisCacheFlushOnlyDeletesItsPrefix(t *testing.T) {
 	client := newFakeClient()
 	cache := newWithClient(client, "test:")
@@ -293,6 +308,12 @@ type fakeClient struct {
 
 	closeCalls int
 }
+
+type fakeRedisError string
+
+func (e fakeRedisError) Error() string { return string(e) }
+
+func (fakeRedisError) RedisError() {}
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{
