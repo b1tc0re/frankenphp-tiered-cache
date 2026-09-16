@@ -160,18 +160,26 @@ func TestRedisCacheCounterErrorsArePropagated(t *testing.T) {
 	}
 }
 
-func TestRedisCacheWrapsRedisCommandErrors(t *testing.T) {
-	client := newFakeClient()
-	wantErr := fakeRedisError("ERR arbitrary server error")
-	client.incrErr = wantErr
-	client.decrErr = wantErr
-	cache := newWithClient(client, "test:")
-
-	if _, err := cache.Increment("counter", 1); !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, wantErr) {
-		t.Fatalf("Increment() error = %v, want ErrRedisCommand wrapping the server error", err)
+func TestRedisCacheWrapsKnownCounterErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "non integer", err: fakeRedisError("ERR value is not an integer or out of range")},
+		{name: "overflow", err: fakeRedisError("ERR increment or decrement would overflow")},
+		{name: "wrong type", err: fakeRedisError("WRONGTYPE Operation against a key holding the wrong kind of value")},
 	}
-	if _, err := cache.Decrement("counter", 1); !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, wantErr) {
-		t.Fatalf("Decrement() error = %v, want ErrRedisCommand wrapping the server error", err)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeClient()
+			client.incrErr = test.err
+			cache := newWithClient(client, "test:")
+
+			if _, err := cache.Increment("counter", 1); !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, test.err) {
+				t.Fatalf("Increment() error = %v, want ErrRedisCommand wrapping the server error", err)
+			}
+		})
 	}
 }
 
@@ -195,6 +203,8 @@ func TestRedisCacheLeavesInfrastructureErrorsForTiered(t *testing.T) {
 		{name: "ask", err: fakeRedisError("ASK 3999 127.0.0.1:6381")},
 		{name: "crossslot", err: goredis.ErrCrossSlot},
 		{name: "noscript", err: goredis.ErrNoScript},
+		{name: "misconf", err: fakeRedisError("MISCONF Redis is configured to save RDB snapshots, but is currently not able to persist on disk")},
+		{name: "unknown", err: fakeRedisError("ERR arbitrary server error")},
 	}
 
 	for _, test := range tests {
