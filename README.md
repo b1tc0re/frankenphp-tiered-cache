@@ -205,10 +205,32 @@ Redis и recovery настраиваются через environment variables:
 | `FRANKEN_CACHE_REDIS_DIAL_TIMEOUT` | timeout подключения | backend default |
 | `FRANKEN_CACHE_REDIS_READ_TIMEOUT` | timeout чтения | backend default |
 | `FRANKEN_CACHE_REDIS_WRITE_TIMEOUT` | timeout записи | backend default |
-| `FRANKEN_CACHE_RECOVERY_INTERVAL` | интервал recovery | `5s` |
+| `FRANKEN_CACHE_RECOVERY_INTERVAL` | пауза между повторными попытками recovery и Pub/Sub reconnect в `degraded` | `5s` |
 
 Значения timeout и recovery interval задаются в формате Go duration, например
 `500ms` или `5s`.
+
+`FRANKEN_CACHE_RECOVERY_INTERVAL` не является периодом обработки обычных
+запросов и не запускает Redis-проверки в healthy-состоянии. Он используется
+только после ошибки, когда экземпляр перешёл в `degraded`:
+
+```text
+degraded
+  ↓ ждём RecoveryInterval
+проверяем Redis
+повторяем недоставленные Pub/Sub invalidation events
+очищаем L1 перед возвратом в healthy
+```
+
+Если Redis или Pub/Sub всё ещё недоступны, следующая попытка выполняется после
+ещё одного такого интервала. При восстановлении Pub/Sub subscriber также ждёт
+этот интервал перед повторным подключением. Поэтому значение `5s` означает,
+что retry обычно начинается не позже чем через 5 секунд после предыдущей
+неудачной попытки, плюс время самой проверки или подключения.
+
+Меньшее значение ускоряет recovery, но чаще создаёт Redis probes и попытки
+reconnect. Большее значение уменьшает эту нагрузку, но дольше оставляет pod в
+`degraded`.
 
 ### Production Docker image
 
