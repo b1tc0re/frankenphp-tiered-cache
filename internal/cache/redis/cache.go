@@ -170,6 +170,7 @@ func wrapRedisCommandError(err error) error {
 func isLogicalCounterError(err error) bool {
 	return goredis.HasErrorPrefix(err, "value is not an integer or out of range") ||
 		goredis.HasErrorPrefix(err, "increment or decrement would overflow") ||
+		goredis.HasErrorPrefix(err, "decrement would overflow") ||
 		goredis.HasErrorPrefix(err, "WRONGTYPE")
 }
 

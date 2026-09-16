@@ -162,22 +162,34 @@ func TestRedisCacheCounterErrorsArePropagated(t *testing.T) {
 
 func TestRedisCacheWrapsKnownCounterErrors(t *testing.T) {
 	tests := []struct {
-		name string
-		err  error
+		name      string
+		err       error
+		decrement bool
 	}{
 		{name: "non integer", err: fakeRedisError("ERR value is not an integer or out of range")},
 		{name: "overflow", err: fakeRedisError("ERR increment or decrement would overflow")},
+		{name: "decrement min int64", err: fakeRedisError("ERR decrement would overflow"), decrement: true},
 		{name: "wrong type", err: fakeRedisError("WRONGTYPE Operation against a key holding the wrong kind of value")},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := newFakeClient()
-			client.incrErr = test.err
+			if test.decrement {
+				client.decrErr = test.err
+			} else {
+				client.incrErr = test.err
+			}
 			cache := newWithClient(client, "test:")
 
-			if _, err := cache.Increment("counter", 1); !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, test.err) {
-				t.Fatalf("Increment() error = %v, want ErrRedisCommand wrapping the server error", err)
+			var err error
+			if test.decrement {
+				_, err = cache.Decrement("counter", 1)
+			} else {
+				_, err = cache.Increment("counter", 1)
+			}
+			if !errors.Is(err, cachecontract.ErrRedisCommand) || !errors.Is(err, test.err) {
+				t.Fatalf("counter operation error = %v, want ErrRedisCommand wrapping the server error", err)
 			}
 		})
 	}
