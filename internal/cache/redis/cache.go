@@ -14,6 +14,7 @@ import (
 
 type client interface {
 	Get(ctx context.Context, key string) ([]byte, time.Duration, error)
+	GetMany(ctx context.Context, keys []string) (map[string]cachecontract.Item, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
 	SetMany(ctx context.Context, values map[string][]byte, ttl time.Duration) error
@@ -37,6 +38,21 @@ var getWithTTLScript = goredis.NewScript(
 		"return {value, redis.call(\"PTTL\", KEYS[1])}",
 )
 
+var getManyWithTTLScript = goredis.NewScript(
+	"local result = {}\n" +
+		"for _, key in ipairs(KEYS) do\n" +
+		"\tlocal value = redis.call(\"GET\", key)\n" +
+		"\tif not value then\n" +
+		"\t\ttable.insert(result, false)\n" +
+		"\t\ttable.insert(result, -2)\n" +
+		"\telse\n" +
+		"\t\ttable.insert(result, value)\n" +
+		"\t\ttable.insert(result, redis.call(\"PTTL\", key))\n" +
+		"\tend\n" +
+		"end\n" +
+		"return result",
+)
+
 func (c redisClient) Get(ctx context.Context, key string) ([]byte, time.Duration, error) {
 	result, err := getWithTTLScript.Run(ctx, c.client, []string{key}).Result()
 	if err != nil {
@@ -44,6 +60,15 @@ func (c redisClient) Get(ctx context.Context, key string) ([]byte, time.Duration
 	}
 
 	return parseGetWithTTLResult(result)
+}
+
+func (c redisClient) GetMany(ctx context.Context, keys []string) (map[string]cachecontract.Item, error) {
+	result, err := getManyWithTTLScript.Run(ctx, c.client, keys).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	return parseGetManyWithTTLResult(result, keys)
 }
 
 func (c redisClient) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
@@ -133,6 +158,37 @@ func (c *RedisCache) Get(key string) ([]byte, time.Duration, error) {
 	}
 
 	return value, ttl, err
+}
+
+// GetMany reads a non-empty set of prefixed keys in one Lua execution and
+// maps the results back to the caller's unprefixed keys.
+func (c *RedisCache) GetMany(keys []string) (map[string]cachecontract.Item, error) {
+	result := make(map[string]cachecontract.Item, len(keys))
+	if len(keys) == 0 {
+		return result, nil
+	}
+
+	prefixedKeys := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		prefixedKey := c.prefixedKey(key)
+		if _, ok := seen[prefixedKey]; ok {
+			continue
+		}
+		seen[prefixedKey] = struct{}{}
+		prefixedKeys = append(prefixedKeys, prefixedKey)
+	}
+
+	found, err := c.client.GetMany(context.Background(), prefixedKeys)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range keys {
+		if item, ok := found[c.prefixedKey(key)]; ok {
+			result[key] = item
+		}
+	}
+	return result, nil
 }
 
 func (c *RedisCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {
@@ -304,28 +360,68 @@ func parseGetWithTTLResult(result interface{}) ([]byte, time.Duration, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	if value == nil {
-		return nil, 0, nil
-	}
 
 	ttlMillis, ok := parts[1].(int64)
 	if !ok {
 		return nil, 0, fmt.Errorf("redis: unexpected PTTL result type %T", parts[1])
 	}
-	if ttlMillis == -1 {
-		return value, 0, nil
-	}
 	if ttlMillis == -2 {
 		return nil, 0, nil
 	}
-	if ttlMillis < 0 {
-		return nil, 0, fmt.Errorf("redis: unexpected PTTL value %d", ttlMillis)
+	ttl, err := parsePTTL(ttlMillis)
+	if err != nil {
+		return nil, 0, err
 	}
-	if ttlMillis == 0 {
-		return value, time.Nanosecond, nil
+	if value == nil {
+		return nil, 0, nil
+	}
+	return value, ttl, nil
+}
+
+func parseGetManyWithTTLResult(result interface{}, keys []string) (map[string]cachecontract.Item, error) {
+	parts, ok := result.([]interface{})
+	if !ok || len(parts) != len(keys)*2 {
+		return nil, fmt.Errorf("redis: unexpected GETMANY result type %T", result)
 	}
 
-	return value, time.Duration(ttlMillis) * time.Millisecond, nil
+	items := make(map[string]cachecontract.Item, len(keys))
+	for i, key := range keys {
+		value, err := redisResultBytes(parts[i*2])
+		if err != nil {
+			return nil, err
+		}
+		ttlMillis, ok := parts[i*2+1].(int64)
+		if !ok {
+			return nil, fmt.Errorf("redis: unexpected PTTL result type %T", parts[i*2+1])
+		}
+		if ttlMillis == -2 {
+			continue
+		}
+
+		ttl, err := parsePTTL(ttlMillis)
+		if err != nil {
+			return nil, err
+		}
+		if value == nil {
+			continue
+		}
+		items[key] = cachecontract.Item{Value: value, TTL: ttl}
+	}
+
+	return items, nil
+}
+
+func parsePTTL(ttlMillis int64) (time.Duration, error) {
+	if ttlMillis == -1 {
+		return 0, nil
+	}
+	if ttlMillis < 0 {
+		return 0, fmt.Errorf("redis: unexpected PTTL value %d", ttlMillis)
+	}
+	if ttlMillis == 0 {
+		return time.Nanosecond, nil
+	}
+	return time.Duration(ttlMillis) * time.Millisecond, nil
 }
 
 func redisResultBytes(result interface{}) ([]byte, error) {
@@ -333,9 +429,13 @@ func redisResultBytes(result interface{}) ([]byte, error) {
 	case nil:
 		return nil, nil
 	case []byte:
-		return append([]byte(nil), value...), nil
+		copyValue := make([]byte, len(value))
+		copy(copyValue, value)
+		return copyValue, nil
 	case string:
-		return []byte(value), nil
+		copyValue := make([]byte, len(value))
+		copy(copyValue, value)
+		return copyValue, nil
 	case bool:
 		if !value {
 			return nil, nil

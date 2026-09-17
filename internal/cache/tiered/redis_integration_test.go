@@ -132,6 +132,34 @@ func TestTieredCacheRedisPubSubIntegration(t *testing.T) {
 		}
 	}
 
+	for key := range updatedBatchValues {
+		if _, err := l1B.Forget(key); err != nil {
+			t.Fatalf("clear L1 B for %q: %v", key, err)
+		}
+	}
+	for key, want := range updatedBatchValues {
+		value, _, err := l2A.Get(key)
+		if err != nil || string(value) != string(want) {
+			t.Fatalf("direct L2 Get(%q) = (%q, %v), want (%s, nil)", key, value, err, want)
+		}
+	}
+	batchResult, err := cacheB.GetMany([]string{"batch-first", "batch-second", "batch-third", "batch-missing"})
+	if err != nil {
+		t.Fatalf("peer GetMany() error = %v", err)
+	}
+	if len(batchResult) != len(updatedBatchValues) {
+		t.Fatalf("peer GetMany() returned %d items, want %d: %#v", len(batchResult), len(updatedBatchValues), batchResult)
+	}
+	for key, want := range updatedBatchValues {
+		item, ok := batchResult[key]
+		if !ok || string(item.Value) != string(want) || item.TTL <= 0 {
+			t.Fatalf("peer GetMany(%q) = (%q, %v, %t), want value with TTL", key, item.Value, item.TTL, ok)
+		}
+	}
+	if _, ok := batchResult["batch-missing"]; ok {
+		t.Fatal("peer GetMany() returned missing key")
+	}
+
 	if removed, err := cacheA.Forget("key"); err != nil || !removed {
 		t.Fatalf("Forget() = (%t, %v), want (true, nil)", removed, err)
 	}

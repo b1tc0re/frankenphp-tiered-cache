@@ -158,6 +158,43 @@ func TestMemoryCacheSetManyEmptyBatch(t *testing.T) {
 	}
 }
 
+func TestMemoryCacheGetManyReturnsHitsAndOmitsMisses(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+	cache.now = func() time.Time { return time.Unix(100, 0) }
+	if _, err := cache.Set("temporary", []byte("value"), time.Minute); err != nil {
+		t.Fatalf("Set(temporary) error = %v", err)
+	}
+	if _, err := cache.Forever("forever", []byte("permanent")); err != nil {
+		t.Fatalf("Forever(forever) error = %v", err)
+	}
+
+	result, err := cache.GetMany([]string{"temporary", "missing", "forever"})
+	if err != nil {
+		t.Fatalf("GetMany() error = %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("GetMany() returned %d items, want 2", len(result))
+	}
+	if item, ok := result["temporary"]; !ok || string(item.Value) != "value" || item.TTL <= 0 {
+		t.Fatalf("temporary item = (%q, %v, %t), want value with TTL", item.Value, item.TTL, ok)
+	}
+	if item, ok := result["forever"]; !ok || string(item.Value) != "permanent" || item.TTL != 0 {
+		t.Fatalf("forever item = (%q, %v, %t), want permanent with TTL 0", item.Value, item.TTL, ok)
+	}
+	if _, ok := result["missing"]; ok {
+		t.Fatal("GetMany() included missing key")
+	}
+}
+
+func TestMemoryCacheGetManyEmptyInputReturnsEmptyResult(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+
+	result, err := cache.GetMany(nil)
+	if err != nil || result == nil || len(result) != 0 {
+		t.Fatalf("GetMany(empty) = (%v, %v), want non-nil empty result", result, err)
+	}
+}
+
 func TestMemoryCacheAllowsEmptyNonNilValue(t *testing.T) {
 	cache := newTestMemoryCache(t, Config{})
 	value := make([]byte, 0)

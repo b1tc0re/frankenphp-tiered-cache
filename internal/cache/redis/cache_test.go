@@ -131,6 +131,48 @@ func TestRedisCacheSetManyValidationAndEmptyBatch(t *testing.T) {
 	}
 }
 
+func TestRedisCacheGetManyUsesOnePrefixedBatch(t *testing.T) {
+	client := newFakeClient()
+	client.values["test:first"] = []byte("one")
+	client.ttls["test:first"] = time.Minute
+	client.values["test:empty"] = []byte{}
+	client.ttls["test:empty"] = 0
+	cache := newWithClient(client, "test:")
+
+	result, err := cache.GetMany([]string{"first", "missing", "first", "empty"})
+	if err != nil {
+		t.Fatalf("GetMany() error = %v", err)
+	}
+	if client.getManyCalls != 1 {
+		t.Fatalf("Redis GetMany() calls = %d, want 1", client.getManyCalls)
+	}
+	if len(client.getManyKeys) != 3 || client.getManyKeys[0] != "test:first" || client.getManyKeys[1] != "test:missing" || client.getManyKeys[2] != "test:empty" {
+		t.Fatalf("Redis GetMany() keys = %v, want one prefixed deduplicated batch", client.getManyKeys)
+	}
+	if item, ok := result["first"]; !ok || string(item.Value) != "one" || item.TTL != time.Minute {
+		t.Fatalf("GetMany(first) = (%q, %v, %t), want value and TTL", item.Value, item.TTL, ok)
+	}
+	if _, ok := result["missing"]; ok {
+		t.Fatal("GetMany(missing) returned an item")
+	}
+	if item, ok := result["empty"]; !ok || item.Value == nil || len(item.Value) != 0 || item.TTL != 0 {
+		t.Fatalf("GetMany(empty) = (%q, %v, %t), want found empty value with TTL 0", item.Value, item.TTL, ok)
+	}
+}
+
+func TestRedisCacheGetManyEmptyBatchDoesNotCallRedis(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	result, err := cache.GetMany(nil)
+	if err != nil || result == nil || len(result) != 0 {
+		t.Fatalf("GetMany(empty) = (%v, %v), want non-nil empty result", result, err)
+	}
+	if client.getManyCalls != 0 {
+		t.Fatalf("Redis GetMany() calls for empty batch = %d, want 0", client.getManyCalls)
+	}
+}
+
 func TestRedisCacheRejectsInvalidValuesAndTTL(t *testing.T) {
 	cache := newWithClient(newFakeClient(), "test:")
 
@@ -430,6 +472,32 @@ func TestRedisScanPatternEscapesGlobCharacters(t *testing.T) {
 	}
 }
 
+func TestParseGetManyWithTTLResult(t *testing.T) {
+	result, err := parseGetManyWithTTLResult([]interface{}{
+		[]byte("value"), int64(-1),
+		false, int64(-2),
+		[]byte{}, int64(0),
+	}, []string{"forever", "missing", "empty"})
+	if err != nil {
+		t.Fatalf("parseGetManyWithTTLResult() error = %v", err)
+	}
+	if item, ok := result["forever"]; !ok || string(item.Value) != "value" || item.TTL != 0 {
+		t.Fatalf("forever item = (%q, %v, %t), want value with TTL 0", item.Value, item.TTL, ok)
+	}
+	if _, ok := result["missing"]; ok {
+		t.Fatal("missing key was included in parsed result")
+	}
+	if item, ok := result["empty"]; !ok || item.Value == nil || len(item.Value) != 0 || item.TTL != time.Nanosecond {
+		t.Fatalf("empty item = (%q, %v, %t), want empty value with minimal TTL", item.Value, item.TTL, ok)
+	}
+}
+
+func TestParseGetManyWithTTLResultRejectsUnknownNegativeTTL(t *testing.T) {
+	if _, err := parseGetManyWithTTLResult([]interface{}{false, int64(-5)}, []string{"key"}); err == nil {
+		t.Fatal("parseGetManyWithTTLResult() error = nil, want error")
+	}
+}
+
 type fakeClient struct {
 	mu sync.Mutex
 
@@ -437,6 +505,7 @@ type fakeClient struct {
 	ttls   map[string]time.Duration
 
 	getErr     error
+	getManyErr error
 	setErr     error
 	setNXErr   error
 	setManyErr error
@@ -450,6 +519,8 @@ type fakeClient struct {
 	setCalls     int
 	setNXCalls   int
 	setManyCalls int
+	getManyCalls int
+	getManyKeys  []string
 	closeCalls   int
 }
 
@@ -479,6 +550,29 @@ func (f *fakeClient) Get(_ context.Context, key string) ([]byte, time.Duration, 
 	}
 
 	return append([]byte(nil), value...), f.ttls[key], nil
+}
+
+func (f *fakeClient) GetMany(_ context.Context, keys []string) (map[string]cachecontract.Item, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.getManyCalls++
+	f.getManyKeys = append([]string(nil), keys...)
+	if f.getManyErr != nil {
+		return nil, f.getManyErr
+	}
+
+	result := make(map[string]cachecontract.Item, len(keys))
+	for _, key := range keys {
+		value, ok := f.values[key]
+		if !ok {
+			continue
+		}
+		copyValue := make([]byte, len(value))
+		copy(copyValue, value)
+		result[key] = cachecontract.Item{Value: copyValue, TTL: f.ttls[key]}
+	}
+	return result, nil
 }
 
 func (f *fakeClient) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {

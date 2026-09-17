@@ -117,6 +117,22 @@ func (c *MemoryCache) Get(key string) ([]byte, time.Duration, error) {
 	return value, ttl, nil
 }
 
+// GetMany reads the requested keys through the existing shard-aware Get
+// implementation. Missing keys are omitted from the result.
+func (c *MemoryCache) GetMany(keys []string) (map[string]cachecontract.Item, error) {
+	result := make(map[string]cachecontract.Item, len(keys))
+	for _, key := range keys {
+		value, ttl, err := c.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		if value != nil {
+			result[key] = cachecontract.Item{Value: value, TTL: ttl}
+		}
+	}
+	return result, nil
+}
+
 // Add stores value with expiration only when key is absent. The existence
 // check and insertion are performed under the shard lock, so concurrent Add
 // calls for one key cannot both succeed.

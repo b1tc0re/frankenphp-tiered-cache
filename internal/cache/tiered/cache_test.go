@@ -75,6 +75,152 @@ func TestTieredCacheGetWarmsL1ForeverValue(t *testing.T) {
 	}
 }
 
+func TestTieredCacheGetManyUsesOnlyL1ForHits(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("first", []byte("one"), time.Minute)
+	l1.put("second", []byte("two"), 0)
+	l2 := newFakeCache()
+	l2.getManyErr = errors.New("L2 must not be called")
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	result, err := cache.GetMany([]string{"first", "second"})
+	if err != nil {
+		t.Fatalf("GetMany() error = %v", err)
+	}
+	if len(result) != 2 || string(result["first"].Value) != "one" || string(result["second"].Value) != "two" {
+		t.Fatalf("GetMany() = %#v, want both L1 values", result)
+	}
+	if got := l2.getManyCount(); got != 0 {
+		t.Fatalf("L2 GetMany() calls = %d, want 0", got)
+	}
+}
+
+func TestTieredCacheGetManyReadsOnlyL1MissesAndWarmsL1(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("hot", []byte("l1"), time.Minute)
+	l2 := newFakeCache()
+	l2.put("cold", []byte("l2"), time.Minute)
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	result, err := cache.GetMany([]string{"hot", "cold", "missing"})
+	if err != nil {
+		t.Fatalf("GetMany() error = %v", err)
+	}
+	if len(result) != 2 || string(result["hot"].Value) != "l1" || string(result["cold"].Value) != "l2" {
+		t.Fatalf("GetMany() = %#v, want L1 hit and L2 hit", result)
+	}
+	if _, ok := result["missing"]; ok {
+		t.Fatal("GetMany() returned missing key")
+	}
+	if got := l2.getManyCount(); got != 1 {
+		t.Fatalf("L2 GetMany() calls = %d, want 1", got)
+	}
+	if got := l2.getManyKeys(); len(got) != 2 || got[0] != "cold" || got[1] != "missing" {
+		t.Fatalf("L2 GetMany() keys = %v, want only misses", got)
+	}
+	if value, ttl, err := l1.Get("cold"); err != nil || string(value) != "l2" || ttl <= 0 {
+		t.Fatalf("warmed L1 cold = (%q, %v, %v), want l2 with TTL", value, ttl, err)
+	}
+}
+
+func TestTieredCacheGetManyWarmsForeverValue(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.put("forever", []byte("value"), 0)
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	result, err := cache.GetMany([]string{"forever"})
+	if err != nil || string(result["forever"].Value) != "value" || result["forever"].TTL != 0 {
+		t.Fatalf("GetMany() = (%#v, %v), want forever value", result, err)
+	}
+	if _, ttl, err := l1.Get("forever"); err != nil || ttl != 0 {
+		t.Fatalf("warmed L1 TTL = %v, %v; want 0, nil", ttl, err)
+	}
+}
+
+func TestTieredCacheGetManyUsesRemainingTTL(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.put("key", []byte("value"), time.Second)
+	l2.getManyDelay = 50 * time.Millisecond
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	result, err := cache.GetMany([]string{"key"})
+	if err != nil {
+		t.Fatalf("GetMany() error = %v", err)
+	}
+	ttl := result["key"].TTL
+	if ttl <= 0 || ttl >= time.Second-25*time.Millisecond {
+		t.Fatalf("GetMany() TTL = %v, want reduced positive TTL", ttl)
+	}
+	if _, l1TTL, err := l1.Get("key"); err != nil || l1TTL != ttl {
+		t.Fatalf("warmed L1 TTL = %v, %v; want %v, nil", l1TTL, err, ttl)
+	}
+}
+
+func TestTieredCacheGetManyL2FailureDoesNotReturnPartialResult(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("warm", []byte("value"), time.Minute)
+	l2 := newFakeCache()
+	l2.getManyErr = errors.New("redis unavailable")
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	result, err := cache.GetMany([]string{"warm", "cold"})
+	if result != nil {
+		t.Fatalf("GetMany() result = %#v, want nil on L2 failure", result)
+	}
+	if err == nil {
+		t.Fatal("GetMany() error = nil, want unavailable error")
+	}
+	if got := l2.getManyCount(); got != 1 {
+		t.Fatalf("L2 GetMany() calls = %d, want 1", got)
+	}
+}
+
+func TestTieredCacheGetManyDoesNotWarmStaleBatchAfterLocalMutation(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.put("key", []byte("old"), time.Minute)
+	l2.getManyStarted = make(chan struct{}, 1)
+	l2.releaseGetMany = make(chan struct{})
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	type getResult struct {
+		values map[string]cachecontract.Item
+		err    error
+	}
+	resultCh := make(chan getResult, 1)
+	go func() {
+		values, err := cache.GetMany([]string{"key"})
+		resultCh <- getResult{values: values, err: err}
+	}()
+
+	select {
+	case <-l2.getManyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for L2 GetMany()")
+	}
+
+	if ok, err := cache.Set("key", []byte("new"), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
+	}
+	close(l2.releaseGetMany)
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("GetMany() error = %v", result.err)
+	}
+	if string(result.values["key"].Value) != "new" {
+		t.Fatalf("GetMany() value = %q, want new", result.values["key"].Value)
+	}
+	if got := l2.getManyCount(); got != 1 {
+		t.Fatalf("L2 GetMany() calls = %d, want 1 after L1 was refreshed", got)
+	}
+	if value, _, err := l1.Get("key"); err != nil || string(value) != "new" {
+		t.Fatalf("L1 value = (%q, %v), want new", value, err)
+	}
+}
+
 func TestTieredCacheGetDoesNotWarmStaleL2AfterLocalMutation(t *testing.T) {
 	l1 := newFakeCache()
 	l2 := newFakeCache()
@@ -670,6 +816,7 @@ type fakeCache struct {
 	ttls   map[string]time.Duration
 
 	getErr       error
+	getManyErr   error
 	setErr       error
 	addErr       error
 	setManyErr   error
@@ -680,22 +827,27 @@ type fakeCache struct {
 	flushErr     error
 	closeErr     error
 	getDelay     time.Duration
+	getManyDelay time.Duration
 	setDelay     time.Duration
 	addDelay     time.Duration
 	setManyDelay time.Duration
 	touchDelay   time.Duration
 
-	getStarted   chan struct{}
-	releaseGet   chan struct{}
-	setStarted   chan struct{}
-	releaseSet   chan struct{}
-	setHook      func()
-	getCalls     int
-	setCalls     int
-	setManyCalls int
-	forgetCalls  int
-	flushCalls   int
-	closeCalls   int
+	getStarted      chan struct{}
+	releaseGet      chan struct{}
+	getManyStarted  chan struct{}
+	releaseGetMany  chan struct{}
+	setStarted      chan struct{}
+	releaseSet      chan struct{}
+	setHook         func()
+	getCalls        int
+	getManyCalls    int
+	getManyKeysSeen []string
+	setCalls        int
+	setManyCalls    int
+	forgetCalls     int
+	flushCalls      int
+	closeCalls      int
 }
 
 func newFakeCache() *fakeCache {
@@ -742,6 +894,44 @@ func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 		return nil, 0, nil
 	}
 	return value, ttl, nil
+}
+
+func (f *fakeCache) GetMany(keys []string) (map[string]cachecontract.Item, error) {
+	f.mu.Lock()
+	f.getManyCalls++
+	f.getManyKeysSeen = append([]string(nil), keys...)
+	err := f.getManyErr
+	started := f.getManyStarted
+	release := f.releaseGetMany
+	delay := f.getManyDelay
+	result := make(map[string]cachecontract.Item, len(keys))
+	for _, key := range keys {
+		value, ok := f.values[key]
+		if !ok {
+			continue
+		}
+		copyValue := make([]byte, len(value))
+		copy(copyValue, value)
+		result[key] = cachecontract.Item{Value: copyValue, TTL: f.ttls[key]}
+	}
+	f.mu.Unlock()
+
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (f *fakeCache) Add(key string, value []byte, ttl time.Duration) (bool, error) {
@@ -931,4 +1121,16 @@ func (f *fakeCache) flushCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.flushCalls
+}
+
+func (f *fakeCache) getManyCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getManyCalls
+}
+
+func (f *fakeCache) getManyKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.getManyKeysSeen...)
 }

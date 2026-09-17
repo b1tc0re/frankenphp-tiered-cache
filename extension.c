@@ -32,6 +32,86 @@ PHP_FUNCTION(franken_cache_tiered_get)
     RETURN_STR(value);
 }
 
+PHP_FUNCTION(franken_cache_tiered_many)
+{
+    zval *keys;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(keys)
+    ZEND_PARSE_PARAMETERS_END();
+
+    array_init(return_value);
+    uint32_t count = zend_hash_num_elements(Z_ARRVAL_P(keys));
+    if (count == 0) {
+        return;
+    }
+
+    franken_cache_many_item *items = safe_emalloc(count, sizeof(*items), 0);
+    uint32_t index = 0;
+    int invalid_key = 0;
+    zval *entry;
+
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(keys), entry) {
+        if (Z_TYPE_P(entry) != IS_STRING) {
+            zend_type_error("franken_cache_tiered_many() keys must be strings");
+            invalid_key = 1;
+            break;
+        }
+        items[index].key = Z_STR_P(entry);
+        items[index].value = NULL;
+        items[index].found = 0;
+        index++;
+    } ZEND_HASH_FOREACH_END();
+
+    int result = -1;
+    if (!invalid_key) {
+        result = franken_cache_tiered_many_go(items, index);
+    }
+
+    if (invalid_key || result < 0) {
+        for (uint32_t i = 0; i < index; i++) {
+            if (items[i].value != NULL) {
+                zend_string_release(items[i].value);
+            }
+        }
+        efree(items);
+        if (!invalid_key) {
+            franken_cache_throw_tiered_error();
+        }
+        RETURN_THROWS();
+    }
+
+    for (uint32_t i = 0; i < index; i++) {
+        if (items[i].found) {
+            if (items[i].value == NULL) {
+                add_assoc_stringl_ex(
+                    return_value,
+                    ZSTR_VAL(items[i].key),
+                    ZSTR_LEN(items[i].key),
+                    "",
+                    0
+                );
+                continue;
+            }
+            add_assoc_str_ex(
+                return_value,
+                ZSTR_VAL(items[i].key),
+                ZSTR_LEN(items[i].key),
+                items[i].value
+            );
+            items[i].value = NULL;
+        } else {
+            add_assoc_bool_ex(
+                return_value,
+                ZSTR_VAL(items[i].key),
+                ZSTR_LEN(items[i].key),
+                0
+            );
+        }
+    }
+    efree(items);
+}
+
 PHP_FUNCTION(franken_cache_tiered_add)
 {
     zend_string *key;

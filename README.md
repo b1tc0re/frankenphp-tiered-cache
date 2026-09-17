@@ -184,6 +184,7 @@ Dockerfile собирает FrankenPHP через `xcaddy` и подключае
 
 ```text
 franken_cache_tiered_get
+franken_cache_tiered_many
 franken_cache_tiered_add
 franken_cache_tiered_put_many
 franken_cache_tiered_set
@@ -196,6 +197,11 @@ franken_cache_tiered_decrement
 ```
 
 Redis и recovery настраиваются через environment variables:
+
+`franken_cache_tiered_many` принимает список ключей и возвращает associative
+array с raw payload для найденных значений и `false` для cache miss. Сначала
+проверяется локальный Memory L1, а все отсутствующие ключи читаются из Redis
+одним batch-запросом; пустой список возвращает `[]` без обращения к Redis.
 
 | Переменная | Назначение | Default |
 | --- | --- | --- |

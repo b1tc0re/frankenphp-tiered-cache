@@ -17,6 +17,7 @@ function expect_true(bool $condition, string $message): void
 
 $functions = [
     'franken_cache_tiered_get',
+    'franken_cache_tiered_many',
     'franken_cache_tiered_add',
     'franken_cache_tiered_put_many',
     'franken_cache_tiered_set',
@@ -45,6 +46,11 @@ expect_true(franken_cache_tiered_put_many([
 ], 60), 'putMany failed.');
 expect_true(franken_cache_tiered_get('many-a') === 'one', 'putMany value a is missing.');
 expect_true(franken_cache_tiered_get('many-b') === 'two', 'putMany value b is missing.');
+$many = franken_cache_tiered_many(['many-a', 'many-b', 'many-missing']);
+expect_true($many['many-a'] === 'one', 'many value a is missing.');
+expect_true($many['many-b'] === 'two', 'many value b is missing.');
+expect_true($many['many-missing'] === false, 'many miss must be false.');
+expect_true(franken_cache_tiered_many([]) === [], 'Empty many must return an empty array.');
 
 try {
     franken_cache_tiered_set('invalid-ttl', 'value', 0);
@@ -60,9 +66,12 @@ expect_true(franken_cache_tiered_set('binary', $binary, 60), 'Binary Set failed.
 expect_true(franken_cache_tiered_get('binary') === $binary, 'Binary payload was not preserved.');
 expect_true(franken_cache_tiered_put_many(['many-binary' => $binary], 60), 'Binary putMany failed.');
 expect_true(franken_cache_tiered_get('many-binary') === $binary, 'Binary putMany payload was not preserved.');
+$manyBinary = franken_cache_tiered_many(['many-binary']);
+expect_true($manyBinary['many-binary'] === $binary, 'Binary many payload was not preserved.');
 
 expect_true(franken_cache_tiered_set('empty', '', 60), 'Empty payload Set failed.');
 expect_true(franken_cache_tiered_get('empty') === '', 'Empty payload was not preserved.');
+expect_true(franken_cache_tiered_many(['empty'])['empty'] === '', 'Empty many payload was not preserved.');
 
 expect_true(franken_cache_tiered_forever('forever', 'persistent'), 'Forever failed.');
 expect_true(franken_cache_tiered_get('forever') === 'persistent', 'Forever value is missing.');

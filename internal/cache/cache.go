@@ -14,12 +14,19 @@ var (
 	ErrRedisCommand       = errors.New("cache: Redis command was rejected")
 )
 
+type Item struct {
+	Value []byte
+	TTL   time.Duration
+}
+
 type Cache interface {
 	// Get returns a cached value and its remaining TTL.
 	//
 	// A nil value with a nil error means cache miss. A zero TTL means that the
 	// value does not expire.
 	Get(key string) ([]byte, time.Duration, error)
+	// GetMany returns only found keys and their remaining TTLs.
+	GetMany(keys []string) (map[string]Item, error)
 	// Add stores value only when key is absent.
 	Add(key string, value []byte, ttl time.Duration) (bool, error)
 	// SetMany stores all values with the same expiration.

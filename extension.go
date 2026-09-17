@@ -120,6 +120,40 @@ func franken_cache_tiered_get_go(key *C.zend_string, status *C.int) *C.zend_stri
 	return (*C.zend_string)(frankenphp.PHPString(valueString, false))
 }
 
+//export franken_cache_tiered_many_go
+func franken_cache_tiered_many_go(items *C.franken_cache_many_item, count C.size_t) C.int {
+	if count == 0 {
+		return 0
+	}
+
+	itemSlice := unsafe.Slice(items, int(count))
+	keys := make([]string, int(count))
+	for i, item := range itemSlice {
+		if item.key == nil {
+			return -1
+		}
+		keys[i] = frankenphp.GoString(unsafe.Pointer(item.key))
+	}
+
+	values, err := phpTieredCache.GetMany(keys)
+	if err != nil {
+		return -1
+	}
+	for i, key := range keys {
+		item, ok := values[key]
+		if !ok {
+			continue
+		}
+		itemSlice[i].found = 1
+		itemSlice[i].value = (*C.zend_string)(frankenphp.PHPString(string(item.Value), false))
+		if len(item.Value) > 0 && itemSlice[i].value == nil {
+			return -1
+		}
+	}
+
+	return 0
+}
+
 //export franken_cache_tiered_add_go
 func franken_cache_tiered_add_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)

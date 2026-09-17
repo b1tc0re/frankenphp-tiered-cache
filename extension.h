@@ -10,4 +10,10 @@ typedef struct {
     zend_string *value;
 } franken_cache_put_many_item;
 
+typedef struct {
+    zend_string *key;
+    zend_string *value;
+    int found;
+} franken_cache_many_item;
+
 #endif
