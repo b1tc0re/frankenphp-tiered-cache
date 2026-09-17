@@ -18,6 +18,7 @@ function expect_true(bool $condition, string $message): void
 $functions = [
     'franken_cache_tiered_get',
     'franken_cache_tiered_add',
+    'franken_cache_tiered_put_many',
     'franken_cache_tiered_set',
     'franken_cache_tiered_forever',
     'franken_cache_tiered_forget',
@@ -37,6 +38,13 @@ expect_true(franken_cache_tiered_touch('missing', 60) === false, 'Touch must ret
 expect_true(franken_cache_tiered_add('add', 'value', 60), 'Add failed for a missing key.');
 expect_true(franken_cache_tiered_add('add', 'new', 60) === false, 'Add overwrote an existing key.');
 expect_true(franken_cache_tiered_get('add') === 'value', 'Add changed the existing value.');
+expect_true(! franken_cache_tiered_put_many([], 60), 'Empty putMany must return false.');
+expect_true(franken_cache_tiered_put_many([
+    'many-a' => 'one',
+    'many-b' => 'two',
+], 60), 'putMany failed.');
+expect_true(franken_cache_tiered_get('many-a') === 'one', 'putMany value a is missing.');
+expect_true(franken_cache_tiered_get('many-b') === 'two', 'putMany value b is missing.');
 
 try {
     franken_cache_tiered_set('invalid-ttl', 'value', 0);
@@ -50,6 +58,8 @@ expect_true(franken_cache_tiered_get('plain') === 'value', 'Get returned an unex
 $binary = "A\0B\xFF\x00C";
 expect_true(franken_cache_tiered_set('binary', $binary, 60), 'Binary Set failed.');
 expect_true(franken_cache_tiered_get('binary') === $binary, 'Binary payload was not preserved.');
+expect_true(franken_cache_tiered_put_many(['many-binary' => $binary], 60), 'Binary putMany failed.');
+expect_true(franken_cache_tiered_get('many-binary') === $binary, 'Binary putMany payload was not preserved.');
 
 expect_true(franken_cache_tiered_set('empty', '', 60), 'Empty payload Set failed.');
 expect_true(franken_cache_tiered_get('empty') === '', 'Empty payload was not preserved.');

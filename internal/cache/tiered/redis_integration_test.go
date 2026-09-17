@@ -94,6 +94,44 @@ func TestTieredCacheRedisPubSubIntegration(t *testing.T) {
 	warmCacheFromL2(t, cacheA, "v1")
 	warmCacheFromL2(t, cacheB, "v1")
 
+	batchValues := map[string][]byte{
+		"batch-first":  []byte("batch-v1-first"),
+		"batch-second": []byte("batch-v1-second"),
+		"batch-third":  []byte("batch-v1-third"),
+	}
+	if stored, err := cacheA.SetMany(batchValues, time.Minute); err != nil || !stored {
+		t.Fatalf("initial SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	for key, want := range batchValues {
+		waitForRedisIntegrationCondition(t, func() bool {
+			value, _, err := l2A.Get(key)
+			return err == nil && string(value) == string(want)
+		})
+		warmCacheFromL2Key(t, cacheB, key, string(want))
+	}
+
+	updatedBatchValues := map[string][]byte{
+		"batch-first":  []byte("batch-v2-first"),
+		"batch-second": []byte("batch-v2-second"),
+		"batch-third":  []byte("batch-v2-third"),
+	}
+	if stored, err := cacheA.SetMany(updatedBatchValues, time.Minute); err != nil || !stored {
+		t.Fatalf("updated SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	for key, want := range updatedBatchValues {
+		waitForRedisIntegrationCondition(t, func() bool {
+			value, _, err := l2A.Get(key)
+			return err == nil && string(value) == string(want)
+		})
+		waitForRedisIntegrationCondition(t, func() bool {
+			value, _, err := l1B.Get(key)
+			return err == nil && value == nil
+		})
+		if value, _, err := cacheB.Get(key); err != nil || string(value) != string(want) {
+			t.Fatalf("peer Get(%q) = (%q, %v), want (%s, nil)", key, value, err, want)
+		}
+	}
+
 	if removed, err := cacheA.Forget("key"); err != nil || !removed {
 		t.Fatalf("Forget() = (%t, %v), want (true, nil)", removed, err)
 	}
@@ -138,13 +176,17 @@ func TestTieredCacheRedisPubSubIntegration(t *testing.T) {
 
 func warmCacheFromL2(t *testing.T, cache *TieredCache, want string) {
 	t.Helper()
+	warmCacheFromL2Key(t, cache, "key", want)
+}
 
-	value, _, err := cache.Get("key")
+func warmCacheFromL2Key(t *testing.T, cache *TieredCache, key, want string) {
+	t.Helper()
+	value, _, err := cache.Get(key)
 	if err != nil {
-		t.Fatalf("warm Get() error = %v", err)
+		t.Fatalf("warm Get(%q) error = %v", key, err)
 	}
 	if string(value) != want {
-		t.Fatalf("warm Get() value = %q, want %q", value, want)
+		t.Fatalf("warm Get(%q) value = %q, want %q", key, value, want)
 	}
 }
 

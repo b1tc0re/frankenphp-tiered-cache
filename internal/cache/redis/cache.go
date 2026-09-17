@@ -16,6 +16,7 @@ type client interface {
 	Get(ctx context.Context, key string) ([]byte, time.Duration, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
+	SetMany(ctx context.Context, values map[string][]byte, ttl time.Duration) error
 	IncrBy(ctx context.Context, key string, value int64) (int64, error)
 	DecrBy(ctx context.Context, key string, value int64) (int64, error)
 	Del(ctx context.Context, keys ...string) (int64, error)
@@ -51,6 +52,16 @@ func (c redisClient) Set(ctx context.Context, key string, value []byte, ttl time
 
 func (c redisClient) SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
 	return c.client.SetNX(ctx, key, value, ttl).Result()
+}
+
+func (c redisClient) SetMany(ctx context.Context, values map[string][]byte, ttl time.Duration) error {
+	_, err := c.client.TxPipelined(ctx, func(pipe goredis.Pipeliner) error {
+		for key, value := range values {
+			pipe.Set(ctx, key, value, ttl)
+		}
+		return nil
+	})
+	return err
 }
 
 func (c redisClient) IncrBy(ctx context.Context, key string, value int64) (int64, error) {
@@ -147,6 +158,29 @@ func (c *RedisCache) Add(key string, value []byte, ttl time.Duration) (bool, err
 	}
 
 	return c.client.SetNX(context.Background(), c.prefixedKey(key), value, ttl)
+}
+
+// SetMany stores a non-empty batch in one Redis transaction. Values are
+// prefixed before they reach the low-level client, which keeps the client
+// implementation independent from cache key policy.
+func (c *RedisCache) SetMany(values map[string][]byte, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+	if len(values) == 0 {
+		return false, nil
+	}
+
+	prefixedValues := make(map[string][]byte, len(values))
+	for key, value := range values {
+		if value == nil {
+			return false, cachecontract.ErrNilValue
+		}
+		prefixedValues[c.prefixedKey(key)] = value
+	}
+
+	err := c.client.SetMany(context.Background(), prefixedValues, ttl)
+	return err == nil, err
 }
 
 func (c *RedisCache) Forever(key string, value []byte) (bool, error) {

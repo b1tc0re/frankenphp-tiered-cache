@@ -289,6 +289,113 @@ func TestTieredCacheAddReturnsCommittedResultOnL1Failure(t *testing.T) {
 	}
 }
 
+func TestTieredCacheSetManyUpdatesBothLevelsAndVersionOnce(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+	values := map[string][]byte{
+		"first":  []byte("one"),
+		"second": []byte("two"),
+		"third":  []byte("three"),
+	}
+	version := cache.mutationVersion.Load()
+
+	stored, err := cache.SetMany(values, time.Minute)
+	if !stored || err != nil {
+		t.Fatalf("SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	if got := cache.mutationVersion.Load(); got != version+1 {
+		t.Fatalf("mutationVersion after SetMany() = %d, want %d", got, version+1)
+	}
+	if l2.setManyCalls != 1 || l2.setCalls != 0 {
+		t.Fatalf("L2 calls = (SetMany=%d, Set=%d), want (1, 0)", l2.setManyCalls, l2.setCalls)
+	}
+	for key, want := range values {
+		for name, backend := range map[string]*fakeCache{"L1": l1, "L2": l2} {
+			value, ttl, getErr := backend.Get(key)
+			if getErr != nil || string(value) != string(want) || ttl <= 0 {
+				t.Errorf("%s Get(%q) = (%q, %v, %v), want value with TTL", name, key, value, ttl, getErr)
+			}
+		}
+	}
+}
+
+func TestTieredCacheSetManyUsesRemainingTTLForL1(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.setManyDelay = 50 * time.Millisecond
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	const ttl = time.Second
+	stored, err := cache.SetMany(map[string][]byte{"key": []byte("value")}, ttl)
+	if !stored || err != nil {
+		t.Fatalf("SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	_, l1TTL, err := l1.Get("key")
+	if err != nil {
+		t.Fatalf("L1 Get() error = %v", err)
+	}
+	if l1TTL <= 0 || l1TTL >= ttl-25*time.Millisecond {
+		t.Fatalf("L1 TTL after delayed SetMany() = %v, want reduced positive TTL", l1TTL)
+	}
+}
+
+func TestTieredCacheSetManyRedisFailureDoesNotChangeL1(t *testing.T) {
+	l1 := newFakeCache()
+	l1.put("key", []byte("old"), time.Minute)
+	l2 := newFakeCache()
+	wantErr := errors.New("Redis unavailable")
+	l2.setManyErr = wantErr
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	stored, err := cache.SetMany(map[string][]byte{"key": []byte("new")}, time.Minute)
+	if stored || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("SetMany() = (%t, %v), want false and unavailable Redis error", stored, err)
+	}
+	if value, _, getErr := l1.Get("key"); getErr != nil || string(value) != "old" {
+		t.Fatalf("L1 after Redis SetMany() failure = (%q, %v), want old value", value, getErr)
+	}
+}
+
+func TestTieredCacheSetManyReturnsCommittedResultOnL1Failure(t *testing.T) {
+	l1 := newFakeCache()
+	l1.setErr = errors.New("L1 unavailable")
+	l2 := newFakeCache()
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+
+	stored, err := cache.SetMany(map[string][]byte{
+		"first":  []byte("one"),
+		"second": []byte("two"),
+	}, time.Minute)
+	if !stored || !errors.Is(err, ErrPostCommit) || !errors.Is(err, l1.setErr) {
+		t.Fatalf("SetMany() = (%t, %v), want true and post-commit L1 error", stored, err)
+	}
+	for key, want := range map[string]string{"first": "one", "second": "two"} {
+		value, _, getErr := l2.Get(key)
+		if getErr != nil || string(value) != want {
+			t.Errorf("L2 Get(%q) = (%q, %v), want committed value", key, value, getErr)
+		}
+	}
+}
+
+func TestTieredCacheSetManyEmptyBatchDoesNotTouchL2(t *testing.T) {
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	cache := newTestTieredCache(t, Config{}, l1, l2)
+	version := cache.mutationVersion.Load()
+
+	stored, err := cache.SetMany(nil, time.Minute)
+	if stored || err != nil {
+		t.Fatalf("SetMany(empty) = (%t, %v), want (false, nil)", stored, err)
+	}
+	if l2.setManyCalls != 0 {
+		t.Fatalf("L2 SetMany() calls for empty batch = %d, want 0", l2.setManyCalls)
+	}
+	if got := cache.mutationVersion.Load(); got != version {
+		t.Fatalf("mutationVersion after empty SetMany() = %d, want %d", got, version)
+	}
+}
+
 func TestTieredCacheRedisFailureRecoveryClearsL1BeforeHealthy(t *testing.T) {
 	l1 := newFakeCache()
 	l1.put("key", []byte("old"), time.Minute)
@@ -562,30 +669,33 @@ type fakeCache struct {
 	values map[string][]byte
 	ttls   map[string]time.Duration
 
-	getErr     error
-	setErr     error
-	addErr     error
-	incrErr    error
-	decrErr    error
-	forgetErr  error
-	touchErr   error
-	flushErr   error
-	closeErr   error
-	getDelay   time.Duration
-	setDelay   time.Duration
-	addDelay   time.Duration
-	touchDelay time.Duration
+	getErr       error
+	setErr       error
+	addErr       error
+	setManyErr   error
+	incrErr      error
+	decrErr      error
+	forgetErr    error
+	touchErr     error
+	flushErr     error
+	closeErr     error
+	getDelay     time.Duration
+	setDelay     time.Duration
+	addDelay     time.Duration
+	setManyDelay time.Duration
+	touchDelay   time.Duration
 
-	getStarted  chan struct{}
-	releaseGet  chan struct{}
-	setStarted  chan struct{}
-	releaseSet  chan struct{}
-	setHook     func()
-	getCalls    int
-	setCalls    int
-	forgetCalls int
-	flushCalls  int
-	closeCalls  int
+	getStarted   chan struct{}
+	releaseGet   chan struct{}
+	setStarted   chan struct{}
+	releaseSet   chan struct{}
+	setHook      func()
+	getCalls     int
+	setCalls     int
+	setManyCalls int
+	forgetCalls  int
+	flushCalls   int
+	closeCalls   int
 }
 
 func newFakeCache() *fakeCache {
@@ -681,6 +791,25 @@ func (f *fakeCache) Set(key string, value []byte, ttl time.Duration) (bool, erro
 		return false, err
 	}
 	f.put(key, value, ttl)
+	return true, nil
+}
+
+func (f *fakeCache) SetMany(values map[string][]byte, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	f.setManyCalls++
+	err := f.setManyErr
+	delay := f.setManyDelay
+	f.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if err != nil {
+		return false, err
+	}
+	for key, value := range values {
+		f.put(key, value, ttl)
+	}
 	return true, nil
 }
 

@@ -173,6 +173,45 @@ func (c *MemoryCache) Add(key string, value []byte, ttl time.Duration) (bool, er
 	}
 }
 
+// SetMany validates the complete batch before changing the cache, then uses
+// the existing per-key Set implementation for local writes. MemoryCache does
+// not need a cross-key transaction, so a memory-pressure failure can still
+// leave an already written prefix of the batch in place.
+func (c *MemoryCache) SetMany(values map[string][]byte, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, cachecontract.ErrInvalidTTL
+	}
+	if len(values) == 0 {
+		return false, nil
+	}
+
+	for key, value := range values {
+		if value == nil {
+			return false, cachecontract.ErrNilValue
+		}
+		cost := itemCost(key, value)
+		if cost > c.maxItemSize {
+			return false, fmt.Errorf(
+				"%w: item size %d bytes exceeds limit %d bytes",
+				cachecontract.ErrItemTooLarge,
+				cost,
+				c.maxItemSize,
+			)
+		}
+	}
+
+	for key, value := range values {
+		stored, err := c.Set(key, value, ttl)
+		if err != nil {
+			return false, err
+		}
+		if !stored {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // Set stores value with expiration without copying it. The caller transfers
 // read-only ownership of value to the cache while the entry remains reachable.
 func (c *MemoryCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {

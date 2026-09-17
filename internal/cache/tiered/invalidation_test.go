@@ -332,6 +332,77 @@ func TestTieredCacheAddPublishFailureKeepsCommittedValueAndRecovers(t *testing.T
 	waitForInvalidationCondition(t, func() bool { return cacheA.unavailableError() == nil })
 }
 
+func TestTieredCacheSetManyInvalidatesAllPeerKeys(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
+	l2.put("first", []byte("old-first"), time.Minute)
+	l2.put("second", []byte("old-second"), time.Minute)
+	cacheA := newTestTieredCacheWithInvalidation(t, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidation(t, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool { return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load() })
+	warmCacheKey(t, cacheB, "first", "old-first")
+	warmCacheKey(t, cacheB, "second", "old-second")
+
+	stored, err := cacheA.SetMany(map[string][]byte{
+		"first":  []byte("new-first"),
+		"second": []byte("new-second"),
+	}, time.Minute)
+	if !stored || err != nil {
+		t.Fatalf("SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	if got := l2.setManyCalls; got != 1 {
+		t.Fatalf("L2 SetMany() calls = %d, want 1", got)
+	}
+	waitForInvalidationCondition(t, func() bool {
+		first, _, firstErr := l1B.Get("first")
+		second, _, secondErr := l1B.Get("second")
+		return firstErr == nil && secondErr == nil && first == nil && second == nil
+	})
+}
+
+func TestTieredCacheSetManyPublishFailureRetriesAllKeysWithoutRedisRewrite(t *testing.T) {
+	bus := newFakeInvalidationBus()
+	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
+	l2.put("first", []byte("old-first"), time.Minute)
+	l2.put("second", []byte("old-second"), time.Minute)
+	config := Config{RecoveryInterval: 5 * time.Millisecond}
+	cacheA := newTestTieredCacheWithInvalidationConfig(t, config, l1A, l2, bus)
+	cacheB := newTestTieredCacheWithInvalidationConfig(t, config, l1B, l2, bus)
+	waitForInvalidationCondition(t, func() bool { return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load() })
+	warmCacheKey(t, cacheB, "first", "old-first")
+	warmCacheKey(t, cacheB, "second", "old-second")
+
+	wantErr := errors.New("Pub/Sub unavailable")
+	bus.setPublishError(wantErr)
+	stored, err := cacheA.SetMany(map[string][]byte{
+		"first":  []byte("new-first"),
+		"second": []byte("new-second"),
+	}, time.Minute)
+	if !stored || !errors.Is(err, ErrPostCommit) || !errors.Is(err, ErrL2Unavailable) || !errors.Is(err, wantErr) {
+		t.Fatalf("SetMany() = (%t, %v), want committed true and post-commit publish error", stored, err)
+	}
+	if !cacheA.pendingInvalidation("first") || !cacheA.pendingInvalidation("second") {
+		t.Fatal("not all SetMany keys were retained as pending invalidations")
+	}
+	if got := l2.setManyCalls; got != 1 {
+		t.Fatalf("L2 SetMany() calls before recovery = %d, want 1", got)
+	}
+
+	bus.setPublishError(nil)
+	waitForInvalidationCondition(t, func() bool {
+		first, _, firstErr := l1B.Get("first")
+		second, _, secondErr := l1B.Get("second")
+		return firstErr == nil && secondErr == nil && first == nil && second == nil
+	})
+	waitForInvalidationCondition(t, func() bool { return cacheA.unavailableError() == nil })
+	if got := l2.setManyCalls; got != 1 {
+		t.Fatalf("L2 SetMany() calls after recovery = %d, want 1", got)
+	}
+	if cacheA.pendingInvalidation("first") || cacheA.pendingInvalidation("second") {
+		t.Fatal("pending SetMany invalidations were not cleared after recovery")
+	}
+}
+
 func TestTieredCacheRejectedAddDoesNotPublishInvalidation(t *testing.T) {
 	bus := newFakeInvalidationBus()
 	l1A, l1B, l2 := newFakeCache(), newFakeCache(), newFakeCache()
@@ -414,9 +485,14 @@ func (c *TieredCache) pendingInvalidation(key string) bool {
 
 func warmCache(t *testing.T, cache *TieredCache, want string) {
 	t.Helper()
-	value, _, err := cache.Get("key")
+	warmCacheKey(t, cache, "key", want)
+}
+
+func warmCacheKey(t *testing.T, cache *TieredCache, key, want string) {
+	t.Helper()
+	value, _, err := cache.Get(key)
 	if err != nil || string(value) != want {
-		t.Fatalf("warm Get() = (%q, %v), want (%s, nil)", value, err, want)
+		t.Fatalf("warm Get(%q) = (%q, %v), want (%s, nil)", key, value, err, want)
 	}
 }
 

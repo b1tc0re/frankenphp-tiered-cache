@@ -58,6 +58,74 @@ PHP_FUNCTION(franken_cache_tiered_add)
     RETURN_BOOL(result);
 }
 
+PHP_FUNCTION(franken_cache_tiered_put_many)
+{
+    zval *values;
+    zend_long ttl;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_ARRAY(values)
+        Z_PARAM_LONG(ttl)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (ttl <= 0) {
+        zend_value_error("ttl must be greater than zero");
+        RETURN_THROWS();
+    }
+
+    uint32_t count = zend_hash_num_elements(Z_ARRVAL_P(values));
+    if (count == 0) {
+        RETURN_FALSE;
+    }
+
+    franken_cache_put_many_item *items = safe_emalloc(count, sizeof(*items), 0);
+    zend_string **owned_keys = ecalloc(count, sizeof(*owned_keys));
+    uint32_t index = 0;
+    int invalid_value = 0;
+    zval *entry;
+    zend_ulong numeric_key;
+    zend_string *key;
+
+    ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(values), numeric_key, key, entry) {
+        if (Z_TYPE_P(entry) != IS_STRING) {
+            zend_type_error("franken_cache_tiered_put_many() values must be strings");
+            invalid_value = 1;
+            break;
+        }
+
+        if (key != NULL) {
+            items[index].key = key;
+        } else {
+            owned_keys[index] = zend_long_to_str(numeric_key);
+            items[index].key = owned_keys[index];
+        }
+        items[index].value = Z_STR_P(entry);
+        index++;
+    } ZEND_HASH_FOREACH_END();
+
+    int result = -1;
+    if (!invalid_value) {
+        result = franken_cache_tiered_put_many_go(items, index, ttl);
+    }
+
+    for (uint32_t i = 0; i < index; i++) {
+        if (owned_keys[i] != NULL) {
+            zend_string_release(owned_keys[i]);
+        }
+    }
+    efree(owned_keys);
+    efree(items);
+
+    if (invalid_value || result < 0) {
+        if (!invalid_value) {
+            franken_cache_throw_tiered_error();
+        }
+        RETURN_THROWS();
+    }
+
+    RETURN_BOOL(result);
+}
+
 PHP_FUNCTION(franken_cache_tiered_set)
 {
     zend_string *key;

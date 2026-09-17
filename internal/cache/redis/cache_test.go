@@ -81,6 +81,56 @@ func TestRedisCacheAddUsesAtomicSetNX(t *testing.T) {
 	}
 }
 
+func TestRedisCacheSetManyUsesOneAtomicBatch(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+	values := map[string][]byte{
+		"first":  []byte("one"),
+		"second": []byte("two"),
+		"third":  []byte("three"),
+	}
+
+	stored, err := cache.SetMany(values, time.Minute)
+	if !stored || err != nil {
+		t.Fatalf("SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	if client.setManyCalls != 1 || client.setCalls != 0 {
+		t.Fatalf("Redis calls = (SetMany=%d, Set=%d), want (1, 0)", client.setManyCalls, client.setCalls)
+	}
+	for key, want := range values {
+		value, ttl, getErr := cache.Get(key)
+		if getErr != nil || string(value) != string(want) || ttl != time.Minute {
+			t.Errorf("Get(%q) = (%q, %v, %v), want prefixed value and one-minute TTL", key, value, ttl, getErr)
+		}
+		if _, ok := client.values["test:"+key]; !ok {
+			t.Errorf("Redis key %q was not prefixed", key)
+		}
+	}
+}
+
+func TestRedisCacheSetManyValidationAndEmptyBatch(t *testing.T) {
+	client := newFakeClient()
+	cache := newWithClient(client, "test:")
+
+	if stored, err := cache.SetMany(nil, time.Minute); stored || err != nil {
+		t.Fatalf("SetMany(empty) = (%t, %v), want (false, nil)", stored, err)
+	}
+	if client.setManyCalls != 0 {
+		t.Fatalf("SetMany(empty) calls = %d, want 0", client.setManyCalls)
+	}
+
+	if stored, err := cache.SetMany(map[string][]byte{"key": nil}, time.Minute); stored || !errors.Is(err, cachecontract.ErrNilValue) {
+		t.Fatalf("SetMany(nil value) = (%t, %v), want false and ErrNilValue", stored, err)
+	}
+	if client.setManyCalls != 0 {
+		t.Fatalf("SetMany(invalid) calls = %d, want 0", client.setManyCalls)
+	}
+
+	if stored, err := cache.SetMany(map[string][]byte{"key": []byte("value")}, 0); stored || !errors.Is(err, cachecontract.ErrInvalidTTL) {
+		t.Fatalf("SetMany(invalid TTL) = (%t, %v), want false and ErrInvalidTTL", stored, err)
+	}
+}
+
 func TestRedisCacheRejectsInvalidValuesAndTTL(t *testing.T) {
 	cache := newWithClient(newFakeClient(), "test:")
 
@@ -386,19 +436,21 @@ type fakeClient struct {
 	values map[string][]byte
 	ttls   map[string]time.Duration
 
-	getErr    error
-	setErr    error
-	setNXErr  error
-	incrErr   error
-	decrErr   error
-	delErr    error
-	expireErr error
-	scanErr   error
-	closeErr  error
+	getErr     error
+	setErr     error
+	setNXErr   error
+	setManyErr error
+	incrErr    error
+	decrErr    error
+	delErr     error
+	expireErr  error
+	scanErr    error
+	closeErr   error
 
-	setCalls   int
-	setNXCalls int
-	closeCalls int
+	setCalls     int
+	setNXCalls   int
+	setManyCalls int
+	closeCalls   int
 }
 
 type fakeRedisError string
@@ -456,6 +508,21 @@ func (f *fakeClient) SetNX(_ context.Context, key string, value []byte, ttl time
 	f.values[key] = append([]byte(nil), value...)
 	f.ttls[key] = ttl
 	return true, nil
+}
+
+func (f *fakeClient) SetMany(_ context.Context, values map[string][]byte, ttl time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setManyCalls++
+
+	if f.setManyErr != nil {
+		return f.setManyErr
+	}
+	for key, value := range values {
+		f.values[key] = append([]byte(nil), value...)
+		f.ttls[key] = ttl
+	}
+	return nil
 }
 
 func (f *fakeClient) IncrBy(_ context.Context, key string, value int64) (int64, error) {

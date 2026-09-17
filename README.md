@@ -184,6 +184,8 @@ Dockerfile собирает FrankenPHP через `xcaddy` и подключае
 
 ```text
 franken_cache_tiered_get
+franken_cache_tiered_add
+franken_cache_tiered_put_many
 franken_cache_tiered_set
 franken_cache_tiered_forever
 franken_cache_tiered_forget

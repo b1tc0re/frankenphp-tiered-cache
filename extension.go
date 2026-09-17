@@ -138,6 +138,32 @@ func franken_cache_tiered_add_go(key, value *C.zend_string, ttlSeconds C.zend_lo
 	return phpBoolResult(added, nil)
 }
 
+//export franken_cache_tiered_put_many_go
+func franken_cache_tiered_put_many_go(items *C.franken_cache_put_many_item, count C.size_t, ttlSeconds C.zend_long) C.int {
+	ttl, ok := phpTTL(ttlSeconds)
+	if !ok {
+		return -1
+	}
+	if count == 0 {
+		return 0
+	}
+
+	itemSlice := unsafe.Slice(items, int(count))
+	values := make(map[string][]byte, int(count))
+	for _, item := range itemSlice {
+		if item.key == nil || item.value == nil {
+			return -1
+		}
+		values[frankenphp.GoString(unsafe.Pointer(item.key))] = phpBytes(item.value)
+	}
+
+	stored, err := phpTieredCache.SetMany(values, ttl)
+	if err != nil && !errors.Is(err, tieredcache.ErrPostCommit) {
+		return -1
+	}
+	return phpBoolResult(stored, nil)
+}
+
 //export franken_cache_tiered_set_go
 func franken_cache_tiered_set_go(key, value *C.zend_string, ttlSeconds C.zend_long) C.int {
 	ttl, ok := phpTTL(ttlSeconds)

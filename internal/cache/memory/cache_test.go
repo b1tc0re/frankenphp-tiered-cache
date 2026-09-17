@@ -113,6 +113,51 @@ func TestMemoryCacheConcurrentAddOneWinner(t *testing.T) {
 	}
 }
 
+func TestMemoryCacheSetManyValidatesBeforeMutating(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+	values := map[string][]byte{
+		"first":   []byte("value"),
+		"invalid": nil,
+	}
+
+	stored, err := cache.SetMany(values, time.Minute)
+	if stored || !errors.Is(err, cachecontract.ErrNilValue) {
+		t.Fatalf("SetMany() = (%t, %v), want false and ErrNilValue", stored, err)
+	}
+	if value, _, getErr := cache.Get("first"); getErr != nil || value != nil {
+		t.Fatalf("SetMany() partially stored values: (%q, %v)", value, getErr)
+	}
+}
+
+func TestMemoryCacheSetManyStoresAllValues(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+	values := map[string][]byte{
+		"first":  []byte("one"),
+		"second": []byte("two"),
+		"third":  []byte("three"),
+	}
+
+	stored, err := cache.SetMany(values, time.Minute)
+	if !stored || err != nil {
+		t.Fatalf("SetMany() = (%t, %v), want (true, nil)", stored, err)
+	}
+	for key, want := range values {
+		value, ttl, getErr := cache.Get(key)
+		if getErr != nil || string(value) != string(want) || ttl <= 0 {
+			t.Errorf("Get(%q) = (%q, %v, %v), want value with TTL", key, value, ttl, getErr)
+		}
+	}
+}
+
+func TestMemoryCacheSetManyEmptyBatch(t *testing.T) {
+	cache := newTestMemoryCache(t, Config{})
+
+	stored, err := cache.SetMany(nil, time.Minute)
+	if stored || err != nil {
+		t.Fatalf("SetMany(empty) = (%t, %v), want (false, nil)", stored, err)
+	}
+}
+
 func TestMemoryCacheAllowsEmptyNonNilValue(t *testing.T) {
 	cache := newTestMemoryCache(t, Config{})
 	value := make([]byte, 0)

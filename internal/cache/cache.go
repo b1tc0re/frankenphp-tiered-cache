@@ -22,6 +22,8 @@ type Cache interface {
 	Get(key string) ([]byte, time.Duration, error)
 	// Add stores value only when key is absent.
 	Add(key string, value []byte, ttl time.Duration) (bool, error)
+	// SetMany stores all values with the same expiration.
+	SetMany(values map[string][]byte, ttl time.Duration) (bool, error)
 	Set(key string, value []byte, ttl time.Duration) (bool, error)
 	Forever(key string, value []byte) (bool, error)
 	Forget(key string) (bool, error)
