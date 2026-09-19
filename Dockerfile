@@ -23,3 +23,4 @@ FROM dunglas/frankenphp:${FRANKENPHP_VERSION}-php8.4-bookworm
 
 COPY --from=builder /usr/local/bin/frankenphp /usr/local/bin/frankenphp
 COPY tests /opt/frankenphp-tiered-cache/tests
+COPY version.json /opt/frankenphp-tiered-cache/version.json

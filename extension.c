@@ -3,6 +3,8 @@
 
 #include "_cgo_export.h"
 
+#include <string.h>
+
 static void franken_cache_throw_tiered_error(void)
 {
     zend_throw_error(NULL, "franken_cache TieredCache operation failed");
@@ -345,6 +347,20 @@ PHP_FUNCTION(franken_cache_tiered_decrement)
     RETURN_LONG(result);
 }
 
+static char franken_cache_version_storage[64];
+
+void franken_cache_set_version(const char *version)
+{
+    size_t length = strlen(version);
+    if (length >= sizeof(franken_cache_version_storage)) {
+        length = sizeof(franken_cache_version_storage) - 1;
+    }
+
+    memcpy(franken_cache_version_storage, version, length);
+    franken_cache_version_storage[length] = '\0';
+    franken_cache_module_entry.version = franken_cache_version_storage;
+}
+
 zend_module_entry franken_cache_module_entry = {
     STANDARD_MODULE_HEADER,
     "franken_cache",
@@ -354,6 +370,6 @@ zend_module_entry franken_cache_module_entry = {
     NULL,
     NULL,
     NULL,
-    "0.0.0-dev",
+    NULL,
     STANDARD_MODULE_PROPERTIES
 };

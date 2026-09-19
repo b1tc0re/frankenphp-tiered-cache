@@ -2,15 +2,19 @@ package frankencache
 
 /*
 #include "extension.h"
+#include <stdlib.h>
 */
 import "C"
 
 import (
+	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -32,11 +36,35 @@ type phpMemoryObserver struct {
 	reporter *observability.PressureReporter
 }
 
+//go:embed version.json
+var extensionVersionFile []byte
+
+func extensionVersion() string {
+	var metadata struct {
+		Version string `json:"version"`
+	}
+
+	if err := json.Unmarshal(extensionVersionFile, &metadata); err != nil {
+		panic(fmt.Sprintf("franken_cache: parse version.json: %v", err))
+	}
+
+	version := strings.TrimSpace(metadata.Version)
+	if version == "" {
+		panic("franken_cache: version.json contains an empty version")
+	}
+
+	return version
+}
+
 func (o *phpMemoryObserver) OnEviction(summary memory.EvictionSummary) {
 	o.reporter.Observe(summary.Entries, summary.Bytes)
 }
 
 func init() {
+	version := C.CString(extensionVersion())
+	C.franken_cache_set_version(version)
+	C.free(unsafe.Pointer(version))
+
 	reporter, err := observability.NewPressureReporter(phpTieredPressureLogInterval, func(summary observability.PressureSummary) {
 		caddy.Log().Named("franken_cache").Warn(fmt.Sprintf(
 			"MemoryCache evicted live entries due to memory pressure: evicted_entries=%d evicted_bytes=%d window=%s",

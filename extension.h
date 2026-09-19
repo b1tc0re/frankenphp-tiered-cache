@@ -5,6 +5,8 @@
 
 extern zend_module_entry franken_cache_module_entry;
 
+void franken_cache_set_version(const char *version);
+
 typedef struct {
     zend_string *key;
     zend_string *value;
