@@ -148,6 +148,63 @@ MaxItemSizeBytes = 0
 - `main` — стабильное состояние и релизы.
 - `develop` — активная разработка.
 
+Рабочие изменения находятся в `develop`. В `main` изменения попадают только
+через Pull Request/Merge Request; это стабильная ветка, от которой создаются
+релизы.
+
+### Проверки и выпуск версии
+
+GitHub Actions разделён на небольшие независимые workflows. Их имена совпадают
+с локальными Task-задачами:
+
+| Проверка | Локальная команда |
+| --- | --- |
+| `fmt:check` | `task fmt:check` |
+| `mod:check` | `task mod:check` |
+| `version:check` | `task version:check` |
+| `lint:check` | `task lint:check` |
+| `vuln:check` | `task vuln:check` |
+| `vet:check` | `task vet:check` |
+| `race` | `task test` |
+| `integration` | `task test:integration` |
+| Все проверки кроме benchmark | `task ci` |
+
+Локальные версии `golangci-lint` и `govulncheck` фиксируются в `Taskfile.yml` и
+устанавливаются в `.tools/bin`. `task ci` автоматически
+устанавливает отсутствующие инструменты; системный `PATH` настраивать не нужно.
+Отдельно установить их можно командой `task tools:install`. В GitHub Actions
+инструменты устанавливаются соответствующими официальными actions. Каждый
+workflow запускается отдельно для Pull Request/Merge Request и push в `develop`
+или `main`, поэтому обязательные проверки можно настраивать в правилах веток
+независимо друг от друга.
+
+Запустить весь локальный CI одним последовательным сценарием без benchmark:
+
+```bash
+task ci
+```
+
+Команда останавливается на первой ошибке. Для `test:integration` нужен Docker;
+временный Redis-контейнер автоматически удаляется после завершения проверки.
+
+Единая версия хранится в `version.json`. Release Please обновляет это поле и
+changelog в release Pull Request. После его merge создаются Git tag и GitHub
+Release. Go-модуль получает свою версию из Git tag `vX.Y.Z`, а Go-код встраивает
+то же значение из `version.json` в PHP module entry. Поэтому
+`phpversion('franken_cache')` и версия Go-модуля используют один номер.
+
+Релизный цикл:
+
+1. Изменения из `develop` попадают в `main` через Pull Request/Merge Request.
+2. После push в `main` workflow `Release Please` создаёт или обновляет release
+   Pull Request.
+3. После merge release Pull Request Release Please создаёт tag `vX.Y.Z`,
+   GitHub Release и обновляет manifest/`version.json` в рамках release commit.
+
+Тип релиза определяется Conventional Commits (`feat`, `fix`, `perf`, `breaking
+change` и т.д.). Ручное редактирование версии и отдельный ручной release
+workflow не требуются.
+
 ## Сборка
 
 Для локальной разработки нужны Docker и [Task](https://taskfile.dev/).
@@ -158,25 +215,26 @@ MaxItemSizeBytes = 0
 task build
 ```
 
-Собрать image и проверить загрузку расширения и реальные операции
-`TieredCache` через локальный Redis:
+Собрать image и выполнить Go Redis/PubSub и PHP FrankenPHP integration-тесты
+через один локальный Redis:
 
 ```bash
-task smoke
+task test:integration
 ```
 
-`task smoke` автоматически поднимает Redis из корневого `compose.yaml`, поэтому
-отдельно задавать `FRANKEN_CACHE_REDIS_ADDR` для этого сценария не нужно.
+`task test:integration` автоматически поднимает Redis из корневого
+`compose.yaml`, поэтому отдельно задавать `FRANKEN_CACHE_REDIS_ADDR` для этого
+сценария не нужно.
 Успешная проверка выводит две строки:
 
 ```text
-franken_cache smoke test passed (0.0.0-dev).
+franken_cache smoke test passed (0.0.1).
 franken_cache TieredCache PHP bridge smoke test passed.
 ```
 
 Dockerfile собирает FrankenPHP через `xcaddy` и подключает этот модуль
-непосредственно в бинарник. Smoke-тест запускается отдельно после сборки,
-поэтому его результат не нужно искать в Docker build log.
+непосредственно в бинарник. PHP-тесты запускаются после сборки image, поэтому их
+результат не нужно искать в Docker build log.
 
 ### PHP extension API и конфигурация
 
@@ -317,10 +375,14 @@ adapter должен вызывать функции `franken_cache_tiered_*`, �
 
 ```bash
 task test:integration
-task redis:down
 ```
 
-`task test:integration` поднимает зафиксированный в `compose.yaml` Redis `7-alpine`, запускает реальный тест с двумя независимыми L1 и двумя Redis L2/Pub/Sub connections, затем оставляет сервис запущенным для повторных прогонов. `task redis:down` останавливает и удаляет контейнер Compose.
+`task test:integration` поднимает зафиксированный в `compose.yaml` Redis
+`7-alpine`, запускает Go-тест с двумя независимыми L1 и двумя Redis L2/Pub/Sub
+connections, затем собирает FrankenPHP image и запускает PHP bridge smoke-тесты.
+Все проверки используют один Redis-контейнер. После завершения или ошибки Redis,
+Compose-сеть и volume автоматически удаляются. Локальный Docker image сохраняется
+для повторного запуска и удаляется отдельной командой `task clean`.
 
 Тот же тест можно запускать без Docker, если Redis уже доступен:
 
