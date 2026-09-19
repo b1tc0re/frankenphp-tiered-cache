@@ -1,0 +1,14 @@
+.git
+.github
+.agents
+.cache
+.codex
+.tools
+.idea
+.vscode
+bench
+graphify-out
+*.out
+*.test
+coverage.out
+coverage.html

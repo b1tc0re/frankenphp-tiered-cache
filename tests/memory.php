@@ -1,0 +1,95 @@
+<?php
+
+declare(strict_types=1);
+
+function fail(string $message): never
+{
+    fwrite(STDERR, $message . "\n");
+    exit(1);
+}
+
+function expect_true(bool $condition, string $message): void
+{
+    if (! $condition) {
+        fail($message);
+    }
+}
+
+$functions = [
+    'franken_cache_tiered_get',
+    'franken_cache_tiered_many',
+    'franken_cache_tiered_add',
+    'franken_cache_tiered_put_many',
+    'franken_cache_tiered_set',
+    'franken_cache_tiered_forever',
+    'franken_cache_tiered_forget',
+    'franken_cache_tiered_touch',
+    'franken_cache_tiered_flush',
+    'franken_cache_tiered_increment',
+    'franken_cache_tiered_decrement',
+];
+
+foreach ($functions as $function) {
+    expect_true(function_exists($function), "Missing PHP function {$function}().");
+}
+
+expect_true(franken_cache_tiered_flush(), 'Initial TieredCache flush failed.');
+expect_true(franken_cache_tiered_get('missing') === false, 'Cache miss must return false.');
+expect_true(franken_cache_tiered_touch('missing', 60) === false, 'Touch must return false for a missing key.');
+expect_true(franken_cache_tiered_add('add', 'value', 60), 'Add failed for a missing key.');
+expect_true(franken_cache_tiered_add('add', 'new', 60) === false, 'Add overwrote an existing key.');
+expect_true(franken_cache_tiered_get('add') === 'value', 'Add changed the existing value.');
+expect_true(! franken_cache_tiered_put_many([], 60), 'Empty putMany must return false.');
+expect_true(franken_cache_tiered_put_many([
+    'many-a' => 'one',
+    'many-b' => 'two',
+], 60), 'putMany failed.');
+expect_true(franken_cache_tiered_get('many-a') === 'one', 'putMany value a is missing.');
+expect_true(franken_cache_tiered_get('many-b') === 'two', 'putMany value b is missing.');
+$many = franken_cache_tiered_many(['many-a', 'many-b', 'many-missing']);
+expect_true($many['many-a'] === 'one', 'many value a is missing.');
+expect_true($many['many-b'] === 'two', 'many value b is missing.');
+expect_true($many['many-missing'] === false, 'many miss must be false.');
+expect_true(franken_cache_tiered_many([]) === [], 'Empty many must return an empty array.');
+
+try {
+    franken_cache_tiered_set('invalid-ttl', 'value', 0);
+    fail('Set with ttl=0 must throw ValueError.');
+} catch (ValueError) {
+}
+
+expect_true(franken_cache_tiered_set('plain', 'value', 60), 'Set failed.');
+expect_true(franken_cache_tiered_get('plain') === 'value', 'Get returned an unexpected value.');
+
+$binary = "A\0B\xFF\x00C";
+expect_true(franken_cache_tiered_set('binary', $binary, 60), 'Binary Set failed.');
+expect_true(franken_cache_tiered_get('binary') === $binary, 'Binary payload was not preserved.');
+expect_true(franken_cache_tiered_put_many(['many-binary' => $binary], 60), 'Binary putMany failed.');
+expect_true(franken_cache_tiered_get('many-binary') === $binary, 'Binary putMany payload was not preserved.');
+$manyBinary = franken_cache_tiered_many(['many-binary']);
+expect_true($manyBinary['many-binary'] === $binary, 'Binary many payload was not preserved.');
+
+expect_true(franken_cache_tiered_set('empty', '', 60), 'Empty payload Set failed.');
+expect_true(franken_cache_tiered_get('empty') === '', 'Empty payload was not preserved.');
+expect_true(franken_cache_tiered_many(['empty'])['empty'] === '', 'Empty many payload was not preserved.');
+
+expect_true(franken_cache_tiered_forever('forever', 'persistent'), 'Forever failed.');
+expect_true(franken_cache_tiered_get('forever') === 'persistent', 'Forever value is missing.');
+
+expect_true(franken_cache_tiered_set('touch', 'value', 60), 'Touch fixture Set failed.');
+expect_true(franken_cache_tiered_touch('touch', 1), 'Touch failed.');
+usleep(1_100_000);
+expect_true(franken_cache_tiered_get('touch') === false, 'Touched key did not expire.');
+
+expect_true(franken_cache_tiered_forget('plain'), 'Forget failed for a live key.');
+expect_true(franken_cache_tiered_get('plain') === false, 'Forgotten key is still present.');
+expect_true(franken_cache_tiered_forget('plain') === false, 'Forget must return false for a missing key.');
+
+expect_true(franken_cache_tiered_increment('counter', 10) === 10, 'Increment failed.');
+expect_true(franken_cache_tiered_decrement('counter', 3) === 7, 'Decrement failed.');
+
+expect_true(franken_cache_tiered_flush(), 'Final TieredCache flush failed.');
+expect_true(franken_cache_tiered_get('binary') === false, 'Flush did not remove cached values.');
+expect_true(franken_cache_tiered_get('forever') === false, 'Flush did not remove forever values.');
+
+fwrite(STDOUT, "franken_cache TieredCache PHP bridge smoke test passed.\n");
