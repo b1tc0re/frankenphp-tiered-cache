@@ -1,9 +1,26 @@
 version: '3'
 
 vars:
+  TOOLS_DIR: '{{.ROOT_DIR}}/.tools/bin'
+  GO_CACHE_DIR: '{{.ROOT_DIR}}/.cache/go-build'
+  GO_MOD_CACHE_DIR: '{{.ROOT_DIR}}/.cache/go-mod'
+  GOLANGCI_CACHE_DIR: '{{.ROOT_DIR}}/.cache/golangci-lint'
+
+  GOLANGCI_LINT_VERSION: v2.13.2
+  GOVULNCHECK_VERSION: v1.1.4
+
+  GOLANGCI_LINT: '{{.TOOLS_DIR}}/golangci-lint'
+  GOVULNCHECK: '{{.TOOLS_DIR}}/govulncheck'
+
+
   IMAGE: '{{default "frankenphp-tiered-cache:dev" .IMAGE}}'
   COMPOSE_PROJECT: '{{default "frankenphp-tiered-cache" .COMPOSE_PROJECT}}'
   REDIS_NETWORK: '{{.COMPOSE_PROJECT}}_default'
+
+env:
+  GOCACHE: '{{.GO_CACHE_DIR}}'
+  GOMODCACHE: '{{.GO_MOD_CACHE_DIR}}'
+  GOLANGCI_LINT_CACHE: '{{.GOLANGCI_CACHE_DIR}}'
 
 tasks:
   default:
@@ -12,47 +29,118 @@ tasks:
       - task --list
     silent: true
 
+  ci:
+    desc: Run all CI checks except benchmarks
+    deps: [tools:install]
+    cmds:
+      - task: fmt:check
+      - task: mod:check
+      - task: version:check
+      - task: lint:check
+      - task: vet:check
+      - task: vuln:check
+      - task: test
+      - task: test:integration
+
   build:
     desc: Build FrankenPHP with the extension
     cmds:
       - docker build --quiet --tag '{{.IMAGE}}' . >/dev/null
       - echo 'Built {{.IMAGE}}'
 
-  smoke:
-    desc: Build the image and run extension and TieredCache PHP smoke tests
-    deps:
-      - redis:up
+  tools:install:
+    desc: Install pinned development tools into .tools/bin
+    status:
+      - 'expected="{{.GOLANGCI_LINT_VERSION}}"; expected="${expected#v}"; test -x "{{.GOLANGCI_LINT}}" && "{{.GOLANGCI_LINT}}" --version 2>&1 | grep -F "version ${expected}"'
+      - 'test -x "{{.GOVULNCHECK}}" && "{{.GOVULNCHECK}}" --version 2>&1 | grep -F "Scanner: govulncheck@{{.GOVULNCHECK_VERSION}}"'
     cmds:
-      - task: build
-      - docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
-      - docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
+      - mkdir -p '{{.TOOLS_DIR}}'
+      - curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b '{{.TOOLS_DIR}}' {{.GOLANGCI_LINT_VERSION}}
+      - GOBIN='{{.TOOLS_DIR}}' go install golang.org/x/vuln/cmd/govulncheck@{{.GOVULNCHECK_VERSION}}
+
+  tools:check:
+    internal: true
+    cmds:
+      - mkdir -p '{{.GO_CACHE_DIR}}' '{{.GO_MOD_CACHE_DIR}}' '{{.GOLANGCI_CACHE_DIR}}'
+    preconditions:
+      - sh: test -x '{{.GOLANGCI_LINT}}'
+        msg: 'golangci-lint is missing; run: task tools:install'
+      - sh: test -x '{{.GOVULNCHECK}}'
+        msg: 'govulncheck is missing; run: task tools:install'
+
+  fmt:check:
+    desc: Check Go formatting
+    deps: [tools:check]
+    cmds:
+      - files="$(git ls-files '*.go')"; test -z "$(gofmt -l $files)"
+
+  lint:check:
+    desc: Run golangci-lint for the cache packages
+    deps: [tools:check]
+    cmds:
+      - '{{.GOLANGCI_LINT}} run --timeout=5m ./internal/...'
+
+  vet:check:
+    desc: Run go vet for the cache packages
+    deps: [tools:check]
+    cmds:
+      - go vet ./internal/...
+
+  vuln:check:
+    desc: Run govulncheck for the cache packages
+    deps: [tools:check]
+    cmds:
+      - '{{.GOVULNCHECK}} ./internal/...'
+
+  version:check:
+    desc: Check that release manifest and extension version match
+    cmds:
+      - version="$(jq -er '.version' version.json)"; manifest_version="$(jq -er '.["."]' .release-please-manifest.json)"; test "$version" = "$manifest_version"; printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
 
   test:
-    desc: Run Go cache tests
-    cmds:
-      - go test ./internal/...
-
-  test:race:
     desc: Run Go cache tests with the race detector
+    deps: [tools:check]
     cmds:
       - go test -race ./internal/...
 
-  redis:up:
-    desc: Start the Redis service for integration tests
-    cmds:
-      - docker compose -p '{{.COMPOSE_PROJECT}}' up -d --wait redis
-
-  redis:down:
-    desc: Stop the Redis service used by integration tests
-    cmds:
-      - docker compose -p '{{.COMPOSE_PROJECT}}' down --remove-orphans
-
   test:integration:
-    desc: Run the real Redis Pub/Sub integration test
-    deps:
-      - redis:up
+    desc: Run Go Redis and FrankenPHP PHP integration tests with one Redis
+    silent: true
     cmds:
-      - REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+      - |
+        set -e
+
+        run_quiet() {
+          if quiet_output="$("$@" 2>&1)"; then
+            return 0
+          fi
+
+          printf '%s\n' "$quiet_output" >&2
+          return 1
+        }
+
+        cleanup() {
+          docker compose -p '{{.COMPOSE_PROJECT}}' down --volumes --remove-orphans >/dev/null 2>&1 || true
+        }
+
+        trap cleanup EXIT
+
+        run_quiet docker compose -p '{{.COMPOSE_PROJECT}}' up -d --wait redis
+        run_quiet docker build --quiet --tag '{{.IMAGE}}' .
+        REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+        docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
+        docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
+
+  mod:tidy:
+    desc: Synchronize go.mod and go.sum with the source code
+    cmds:
+      - go mod tidy
+
+  mod:check:
+    desc: Check that go.mod and go.sum are tidy
+    cmds:
+      - go mod tidy -diff
+      - go mod verify
 
   bench:laravel:config:
     desc: Validate the Laravel benchmark Compose files
@@ -113,21 +201,6 @@ tasks:
     desc: Measure MemoryCache accounting, Go heap, and process RSS
     cmds:
       - MEMORY_BENCH=1 go test -run '^TestMemoryCacheMemory' -count=1 -v ./internal/cache/memory
-
-  mod:tidy:
-    desc: Synchronize go.mod and go.sum with the source code
-    cmds:
-      - go mod tidy
-
-  mod:check:
-    desc: Check that go.mod and go.sum are tidy
-    cmds:
-      - go mod tidy -diff
-
-  mod:verify:
-    desc: Verify downloaded module contents against go.sum
-    cmds:
-      - go mod verify
 
   clean:
     desc: Remove the local development image

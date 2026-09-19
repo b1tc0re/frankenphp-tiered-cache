@@ -1,0 +1,30 @@
+name: version:check
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: version:check
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check release versions
+        run: |
+          version="$(jq -er '.["."]' .release-please-manifest.json)"
+          extension_version="$(jq -er '.version' version.json)"
+          test "$version" = "$extension_version"
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'

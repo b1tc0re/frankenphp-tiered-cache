@@ -1,0 +1,77 @@
+name: integration
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Go and FrankenPHP integration
+    runs-on: ubuntu-24.04
+
+    env:
+      COMPOSE_PROJECT: frankenphp-tiered-cache-ci
+      IMAGE: frankenphp-tiered-cache:ci
+      REDIS_ADDR: 127.0.0.1:6379
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start Redis
+        run: |
+          if output="$(docker compose -p "$COMPOSE_PROJECT" -f compose.yaml up -d --wait redis 2>&1)"; then
+            :
+          else
+            printf '%s\n' "$output"
+            exit 1
+          fi
+
+      - name: Run Go Redis integration test
+        run: go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+
+      - name: Build FrankenPHP image
+        run: |
+          if output="$(docker build --quiet --tag "$IMAGE" . 2>&1)"; then
+            :
+          else
+            printf '%s\n' "$output"
+            exit 1
+          fi
+
+      - name: Run extension smoke test
+        run: >-
+          docker run --rm
+          --network "${COMPOSE_PROJECT}_default"
+          --env FRANKEN_CACHE_REDIS_ADDR=redis:6379
+          --entrypoint frankenphp
+          "$IMAGE"
+          php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
+
+      - name: Run TieredCache PHP smoke test
+        run: >-
+          docker run --rm
+          --network "${COMPOSE_PROJECT}_default"
+          --env FRANKEN_CACHE_REDIS_ADDR=redis:6379
+          --entrypoint frankenphp
+          "$IMAGE"
+          php-cli /opt/frankenphp-tiered-cache/tests/memory.php
+
+      - name: Stop Redis
+        if: always()
+        run: docker compose -p "$COMPOSE_PROJECT" -f compose.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true

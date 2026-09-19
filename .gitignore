@@ -27,3 +27,7 @@ coverage.html
 # OS
 .DS_Store
 Thumbs.db
+
+# Go tools and cache
+.tools
+.cache
