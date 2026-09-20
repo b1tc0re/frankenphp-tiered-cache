@@ -28,7 +28,6 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 			return nil, 0, err
 		}
 		if value != nil {
-			c.metrics.ObserveLookup(observability.LookupL1Hit)
 			c.mutationMu.Lock()
 			if c.closed {
 				c.mutationMu.Unlock()
@@ -39,9 +38,9 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 				return nil, 0, err
 			}
 			c.mutationMu.Unlock()
+			c.metrics.ObserveLookup(observability.LookupL1Hit)
 			return value, ttl, nil
 		}
-		c.metrics.ObserveL1Miss()
 
 		version := c.mutationVersion.Load()
 		started := time.Now()
@@ -79,15 +78,16 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 			return current, currentTTL, nil
 		}
 		if l2Value == nil {
+			c.metrics.ObserveL1Miss()
 			c.metrics.ObserveLookup(observability.LookupMiss)
 			c.mutationMu.Unlock()
 			return nil, 0, nil
 		}
-		c.metrics.ObserveLookup(observability.LookupL2Hit)
-
 		if l2TTL > 0 {
 			l2TTL -= time.Since(started)
 			if l2TTL <= 0 {
+				c.metrics.ObserveL1Miss()
+				c.metrics.ObserveLookup(observability.LookupMiss)
 				c.mutationMu.Unlock()
 				return nil, 0, nil
 			}
@@ -95,6 +95,8 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 		} else {
 			_, _ = c.l1.Forever(key, l2Value)
 		}
+		c.metrics.ObserveL1Miss()
+		c.metrics.ObserveLookup(observability.LookupL2Hit)
 		c.mutationMu.Unlock()
 		return l2Value, l2TTL, nil
 	}
@@ -127,17 +129,17 @@ func (c *TieredCache) GetMany(keys []string) (map[string]cachecontract.Item, err
 		results := make(map[string]cachecontract.Item, len(keys))
 		misses := make([]string, 0, len(keys))
 		seenMisses := make(map[string]struct{}, len(keys))
+		initialL1Hits := make(map[string]struct{}, len(keys))
 		for _, key := range keys {
 			value, ttl, err := c.l1.Get(key)
 			if err != nil {
 				return nil, err
 			}
 			if value != nil {
-				c.metrics.ObserveLookup(observability.LookupL1Hit)
+				initialL1Hits[key] = struct{}{}
 				results[key] = cachecontract.Item{Value: value, TTL: ttl}
 				continue
 			}
-			c.metrics.ObserveL1Miss()
 			if _, ok := seenMisses[key]; !ok {
 				seenMisses[key] = struct{}{}
 				misses = append(misses, key)
@@ -159,6 +161,9 @@ func (c *TieredCache) GetMany(keys []string) (map[string]cachecontract.Item, err
 				return nil, err
 			}
 			c.mutationMu.Unlock()
+			for range keys {
+				c.metrics.ObserveLookup(observability.LookupL1Hit)
+			}
 			return results, nil
 		}
 
@@ -188,6 +193,11 @@ func (c *TieredCache) GetMany(keys []string) (map[string]cachecontract.Item, err
 			return nil, err
 		}
 
+		lookupResults := make(map[string]observability.LookupResult, len(keys))
+		for key := range initialL1Hits {
+			lookupResults[key] = observability.LookupL1Hit
+		}
+
 		for _, key := range misses {
 			current, currentTTL, currentErr := c.l1.Get(key)
 			if currentErr != nil {
@@ -195,29 +205,36 @@ func (c *TieredCache) GetMany(keys []string) (map[string]cachecontract.Item, err
 				return nil, currentErr
 			}
 			if current != nil {
-				c.metrics.ObserveLookup(observability.LookupL1Hit)
+				lookupResults[key] = observability.LookupL1Hit
 				results[key] = cachecontract.Item{Value: current, TTL: currentTTL}
 				continue
 			}
 
 			item, found := l2Results[key]
 			if !found {
-				c.metrics.ObserveLookup(observability.LookupMiss)
+				lookupResults[key] = observability.LookupMiss
 				continue
 			}
-			c.metrics.ObserveLookup(observability.LookupL2Hit)
 
 			ttl := item.TTL
 			if ttl > 0 {
 				ttl -= elapsed
 				if ttl <= 0 {
+					lookupResults[key] = observability.LookupMiss
 					continue
 				}
 				_, _ = c.l1.Set(key, item.Value, ttl)
 			} else {
 				_, _ = c.l1.Forever(key, item.Value)
 			}
+			lookupResults[key] = observability.LookupL2Hit
 			results[key] = cachecontract.Item{Value: item.Value, TTL: ttl}
+		}
+		for _, key := range keys {
+			if _, ok := initialL1Hits[key]; !ok {
+				c.metrics.ObserveL1Miss()
+			}
+			c.metrics.ObserveLookup(lookupResults[key])
 		}
 		c.mutationMu.Unlock()
 		return results, nil

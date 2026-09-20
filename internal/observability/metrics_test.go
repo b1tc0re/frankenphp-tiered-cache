@@ -33,7 +33,8 @@ func TestMetricsStateSnapshot(t *testing.T) {
 	state.SetPendingFlush(true)
 	state.ObservePostCommitError()
 	state.ObserveL1MutationError()
-	state.ObserveL1FlushFallback()
+	state.ObserveL1FlushFallback(L1FlushFallbackSuccess)
+	state.ObserveL1FlushFallback(L1FlushFallbackFailure)
 
 	snapshot := state.Snapshot()
 	if snapshot.Lookup != [LookupResultCount]uint64{1, 1, 1} {
@@ -60,7 +61,7 @@ func TestMetricsStateSnapshot(t *testing.T) {
 	if !snapshot.InvalidationReady || snapshot.Invalidation[InvalidationPublished][InvalidationKey][InvalidationSuccess] != 1 {
 		t.Fatalf("invalidation snapshot = %#v", snapshot.Invalidation)
 	}
-	if snapshot.PendingInvalidations != 4 || !snapshot.PendingFlush || snapshot.PostCommitErrors != 1 || snapshot.L1MutationErrors != 1 || snapshot.L1FlushFallbacks != 1 {
+	if snapshot.PendingInvalidations != 4 || !snapshot.PendingFlush || snapshot.PostCommitErrors != 1 || snapshot.L1MutationErrors != 1 || snapshot.L1FlushFallbacks != [L1FlushFallbackResultCount]uint64{1, 1} {
 		t.Fatalf("pending/error snapshot = %#v", snapshot)
 	}
 }

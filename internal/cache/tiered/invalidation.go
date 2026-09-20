@@ -176,6 +176,7 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 			if err := c.applyInvalidation(event); err != nil {
 				_ = subscription.Close()
 				c.invalidationReady.Store(false)
+				c.metrics.SetInvalidationReady(false)
 				if ctx.Err() != nil || c.isClosed() {
 					return
 				}

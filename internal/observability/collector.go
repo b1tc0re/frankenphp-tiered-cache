@@ -169,7 +169,7 @@ func newCollector(state *MetricsState, version string, l1Stats func() L1Snapshot
 		),
 		l1FlushFallbacks: prometheus.NewDesc(
 			namespace+"_l1_flush_fallback_total",
-			"L1 flush fallback attempts after mutation errors.", nil, nil,
+			"L1 flush fallback attempts after mutation errors.", []string{"result"}, nil,
 		),
 	}
 }
@@ -279,7 +279,14 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.pendingFlush, prometheus.GaugeValue, pendingFlush)
 	ch <- prometheus.MustNewConstMetric(c.postCommitErrors, prometheus.CounterValue, float64(snapshot.PostCommitErrors))
 	ch <- prometheus.MustNewConstMetric(c.l1MutationErrors, prometheus.CounterValue, float64(snapshot.L1MutationErrors))
-	ch <- prometheus.MustNewConstMetric(c.l1FlushFallbacks, prometheus.CounterValue, float64(snapshot.L1FlushFallbacks))
+	for result := L1FlushFallbackResult(0); result < L1FlushFallbackResultCount; result++ {
+		ch <- prometheus.MustNewConstMetric(
+			c.l1FlushFallbacks,
+			prometheus.CounterValue,
+			float64(snapshot.L1FlushFallbacks[result]),
+			result.String(),
+		)
+	}
 }
 
 func (c *Collector) buildVersion() string {

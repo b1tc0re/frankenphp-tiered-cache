@@ -166,6 +166,25 @@ func (r InvalidationResult) String() string {
 	}
 }
 
+type L1FlushFallbackResult uint8
+
+const (
+	L1FlushFallbackSuccess L1FlushFallbackResult = iota
+	L1FlushFallbackFailure
+	L1FlushFallbackResultCount
+)
+
+func (r L1FlushFallbackResult) String() string {
+	switch r {
+	case L1FlushFallbackSuccess:
+		return "success"
+	case L1FlushFallbackFailure:
+		return "failure"
+	default:
+		return "unknown"
+	}
+}
+
 const L2LatencyBucketCount = 16
 
 var l2LatencyBucketUpperBounds = [...]time.Duration{
@@ -228,7 +247,7 @@ type MetricsState struct {
 
 	postCommitErrors atomic.Uint64
 	l1MutationErrors atomic.Uint64
-	l1FlushFallbacks atomic.Uint64
+	l1FlushFallbacks [L1FlushFallbackResultCount]atomic.Uint64
 }
 
 type L2OperationSnapshot struct {
@@ -265,7 +284,7 @@ type Snapshot struct {
 
 	PostCommitErrors uint64
 	L1MutationErrors uint64
-	L1FlushFallbacks uint64
+	L1FlushFallbacks [L1FlushFallbackResultCount]uint64
 }
 
 func (m *MetricsState) ObserveLookup(result LookupResult) {
@@ -419,10 +438,11 @@ func (m *MetricsState) ObserveL1MutationError() {
 	}
 }
 
-func (m *MetricsState) ObserveL1FlushFallback() {
-	if m != nil {
-		m.l1FlushFallbacks.Add(1)
+func (m *MetricsState) ObserveL1FlushFallback(result L1FlushFallbackResult) {
+	if m == nil || result >= L1FlushFallbackResultCount {
+		return
 	}
+	m.l1FlushFallbacks[result].Add(1)
 }
 
 func (m *MetricsState) Snapshot() Snapshot {
@@ -474,6 +494,8 @@ func (m *MetricsState) Snapshot() Snapshot {
 	snapshot.PendingFlush = m.pendingFlush.Load() != 0
 	snapshot.PostCommitErrors = m.postCommitErrors.Load()
 	snapshot.L1MutationErrors = m.l1MutationErrors.Load()
-	snapshot.L1FlushFallbacks = m.l1FlushFallbacks.Load()
+	for i := range m.l1FlushFallbacks {
+		snapshot.L1FlushFallbacks[i] = m.l1FlushFallbacks[i].Load()
+	}
 	return snapshot
 }

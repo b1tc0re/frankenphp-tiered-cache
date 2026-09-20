@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 type healthState uint32
@@ -106,9 +107,10 @@ func (c *TieredCache) reconcileL1MutationErrorLocked(l1Err error) error {
 	c.metrics.ObserveL1MutationError()
 
 	if _, flushErr := flushL1(c.l1); flushErr == nil {
+		c.metrics.ObserveL1FlushFallback(observability.L1FlushFallbackSuccess)
 		return l1Err
 	} else {
-		c.metrics.ObserveL1FlushFallback()
+		c.metrics.ObserveL1FlushFallback(observability.L1FlushFallbackFailure)
 		combinedErr := errors.Join(l1Err, flushErr)
 		c.degradeLocked(combinedErr, false)
 		return combinedErr
