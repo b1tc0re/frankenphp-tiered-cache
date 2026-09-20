@@ -28,6 +28,30 @@ func TestTieredMetricsDoesNotCountL1HitWhenHealthCheckRejectsResult(t *testing.T
 	}
 }
 
+func TestTieredMetricsCountsL1MissBeforeConcurrentWarm(t *testing.T) {
+	metrics := new(observability.MetricsState)
+	l1 := newFakeCache()
+	l2 := newFakeCache()
+	l2.put("key", []byte("old"), time.Minute)
+	l1.getHook = func() {
+		l1.put("key", []byte("warm"), time.Minute)
+	}
+	cache := newTestTieredCache(t, Config{Metrics: metrics}, l1, l2)
+
+	value, _, err := cache.Get("key")
+	if err != nil || string(value) != "warm" {
+		t.Fatalf("Get() = (%q, %v), want warm value", value, err)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.L1Misses != 1 {
+		t.Fatalf("L1 misses = %d, want 1", snapshot.L1Misses)
+	}
+	if snapshot.Lookup[observability.LookupL1Hit] != 1 || snapshot.Lookup[observability.LookupL2Hit] != 0 {
+		t.Fatalf("lookup metrics = %#v, want one final L1 hit", snapshot.Lookup)
+	}
+}
+
 func TestTieredMetricsDoNotCountGetManyRetryIntermediates(t *testing.T) {
 	metrics := new(observability.MetricsState)
 	l1 := newFakeCache()

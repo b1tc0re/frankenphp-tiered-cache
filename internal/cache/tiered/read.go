@@ -73,6 +73,7 @@ func (c *TieredCache) Get(key string) ([]byte, time.Duration, error) {
 			return nil, 0, currentErr
 		}
 		if current != nil {
+			c.metrics.ObserveL1Miss()
 			c.metrics.ObserveLookup(observability.LookupL1Hit)
 			c.mutationMu.Unlock()
 			return current, currentTTL, nil

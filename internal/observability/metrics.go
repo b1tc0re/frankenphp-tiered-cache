@@ -494,18 +494,19 @@ func (m *MetricsState) Snapshot() Snapshot {
 	snapshot.L1Misses = m.l1Misses.Load()
 	for i := range m.l2 {
 		state := &m.l2[i]
-		snapshot.L2[i] = L2OperationSnapshot{
-			Calls:           state.calls.Load(),
-			LatencySumNanos: state.latencySumNanos.Load(),
-			BatchCalls:      state.batchCalls.Load(),
-			BatchItems:      state.batchItems.Load(),
-		}
+		// ObserveL2 increments calls before the related bucket, error, and
+		// latency atomics. Read calls last so a concurrent scrape cannot
+		// expose more samples in those fields than operations.
 		for j := range state.errors {
 			snapshot.L2[i].Errors[j] = state.errors[j].Load()
 		}
 		for j := range state.latencyBuckets {
 			snapshot.L2[i].LatencyBuckets[j] = state.latencyBuckets[j].Load()
 		}
+		snapshot.L2[i].LatencySumNanos = state.latencySumNanos.Load()
+		snapshot.L2[i].BatchCalls = state.batchCalls.Load()
+		snapshot.L2[i].BatchItems = state.batchItems.Load()
+		snapshot.L2[i].Calls = state.calls.Load()
 	}
 
 	snapshot.L1Entries = m.l1Entries.Load()

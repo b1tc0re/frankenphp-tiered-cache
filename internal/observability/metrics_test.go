@@ -105,6 +105,98 @@ func TestMetricsStateConcurrentUpdates(t *testing.T) {
 	}
 }
 
+func TestCollectorGatherConcurrentL2SnapshotInvariants(t *testing.T) {
+	state := new(MetricsState)
+	registry := prometheus.NewPedanticRegistry()
+	if err := registry.Register(NewCollector(state, "0.1.0")); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+
+	const (
+		writers    = 4
+		iterations = 2000
+	)
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := range iterations {
+				errorClass := L2ErrorNone
+				if i%3 == 0 {
+					errorClass = L2ErrorTransport
+				}
+				state.ObserveL2(OperationGet, time.Microsecond, errorClass)
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	close(start)
+
+	for {
+		families, err := registry.Gather()
+		if err != nil {
+			t.Fatalf("gather metrics: %v", err)
+		}
+
+		var calls float64
+		for _, family := range families {
+			if family.GetName() != "franken_cache_l2_operations_total" {
+				continue
+			}
+			for _, metric := range family.GetMetric() {
+				for _, label := range metric.GetLabel() {
+					if label.GetName() == "operation" && label.GetValue() == "get" {
+						calls = metric.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+
+		for _, family := range families {
+			switch family.GetName() {
+			case "franken_cache_l2_duration_seconds":
+				for _, metric := range family.GetMetric() {
+					isGet := false
+					for _, label := range metric.GetLabel() {
+						isGet = isGet || label.GetName() == "operation" && label.GetValue() == "get"
+					}
+					if !isGet {
+						continue
+					}
+					for _, bucket := range metric.GetHistogram().GetBucket() {
+						if float64(bucket.GetCumulativeCount()) > calls {
+							t.Fatalf("histogram bucket count %d exceeds calls %g", bucket.GetCumulativeCount(), calls)
+						}
+					}
+				}
+			case "franken_cache_l2_errors_total":
+				for _, metric := range family.GetMetric() {
+					isGet := false
+					for _, label := range metric.GetLabel() {
+						isGet = isGet || label.GetName() == "operation" && label.GetValue() == "get"
+					}
+					if isGet && metric.GetCounter().GetValue() > calls {
+						t.Fatalf("error count %g exceeds calls %g", metric.GetCounter().GetValue(), calls)
+					}
+				}
+			}
+		}
+
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+}
+
 func TestCollectorGather(t *testing.T) {
 	state := new(MetricsState)
 	state.ObserveLookup(LookupL1Hit)
