@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0](https://github.com/b1tc0re/frankenphp-tiered-cache/compare/v0.1.0...v0.2.0) (2026-09-20)
+
+
+### Features
+
+* **grafana:** add production dashboard for tiered cache ([12c01ec](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/12c01ecd2cb7a3ed3d32ba3dbc5e5534cb33c187))
+* **grafana:** add Prometheus cache dashboard ([b09a466](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/b09a466cb5bb2e1809a579ee0452067e63de054a))
+* **grafana:** make dashboard production-ready ([73878e8](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/73878e8803055c25215549e828b0154a6d5a3f53))
+* **metrics:** add Prometheus cache metrics ([08b0686](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/08b068629cf252233388b081ca00e8308df38757))
+* **metrics:** add Prometheus metrics for tiered cache ([7bc945f](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/7bc945fd1e00c495a801bc3c755825d63650a44e))
+* **observability:** add Prometheus metrics and Grafana dashboard ([232d1e5](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/232d1e5ae1ae3625049e2cfd9ccf4fe92926fd87))
+
+
+### Bug Fixes
+
+* **grafana:** finalize dashboard query behavior ([1199f73](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/1199f73d5b9c5b03ba2b9b1eeafea39f7794222c))
+* **metrics:** align counters with final cache results ([cbfc383](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/cbfc383f9f4675813fd420795f00947a20c4e39c))
+* **metrics:** close final consistency gaps ([b96668a](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/b96668ac96021c8b6860a7cfd019acf2f08b9908))
+* **metrics:** enable Caddy metrics endpoint in smoke test ([b20a399](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/b20a3997b8271e1c0f3360afe312f23743963df5))
+* **metrics:** finalize Prometheus metric semantics ([1ec70a2](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/1ec70a2db6424aa624333e06ebf21462a5cc16b6))
+
+
+### Performance Improvements
+
+* **metrics:** reduce GetMany instrumentation overhead ([a3d4d11](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/a3d4d1142f0e1570b92918489f5dacf7ed7f8726))
+
 ## [0.1.0](https://github.com/b1tc0re/frankenphp-tiered-cache/compare/v0.0.1...v0.1.0) (2026-09-19)
 
 
