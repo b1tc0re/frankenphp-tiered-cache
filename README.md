@@ -43,28 +43,31 @@ pending invalidation и пытается доставить её во время
 
 ### Prometheus metrics
 
-Метрики подключаются отдельным Caddy global option. Добавьте его в глобальный
-блок Caddyfile:
+Метрики подключаются двумя Caddy global options. Добавьте их в глобальный блок
+Caddyfile:
 
 ```caddyfile
 {
+	metrics
 	franken_cache_metrics
 	admin 0.0.0.0:2019
 }
 ```
 
-После этого collector регистрируется в metrics registry текущего Caddy context,
-а стандартный Caddy admin endpoint отдаёт его по `/metrics`:
+`franken_cache_metrics` регистрирует FrankenPHP Tiered Cache collector в metrics
+registry текущего Caddy context. Глобальная опция `metrics` включает встроенный
+Caddy `/metrics` handler на admin endpoint, а `admin` задаёт адрес этого
+endpoint:
 
 ```bash
 curl http://127.0.0.1:2019/metrics
 ```
 
-Если admin API отключён или слушает на другом адресе/порту, используйте ваш
-фактический admin endpoint. `franken_cache_metrics` не поднимает отдельный HTTP
-сервер и не использует глобальный Prometheus registerer. Поэтому при Caddy
-reload новый collector регистрируется в новом context без повторной регистрации
-в старом registry.
+`franken_cache_metrics` сам по себе не поднимает отдельный HTTP-сервер и не
+включает `/metrics`; без глобальной опции `metrics` collector не будет доступен
+через HTTP. Если admin API отключён или слушает на другом адресе/порту,
+используйте ваш фактический admin endpoint. При Caddy reload новый collector
+регистрируется в новом context без повторной регистрации в старом registry.
 
 Основные группы метрик:
 
