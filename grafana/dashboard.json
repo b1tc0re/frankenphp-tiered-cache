@@ -1,0 +1,277 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "UP", "color": "green" }, "1": { "text": "DOWN", "color": "red" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "max(franken_cache_degraded{instance=~\"$instance\"})", "legendFormat": "degraded", "refId": "A" }],
+      "title": "Cache health",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }, "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "min(franken_cache_invalidation_ready{instance=~\"$instance\"})", "legendFormat": "subscriber ready", "refId": "A" }],
+      "title": "Pub/Sub readiness",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "continuous-GrYlRd" }, "decimals": 1, "mappings": [], "max": 100, "min": 0, "unit": "percent" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "100 * sum(rate(franken_cache_lookup_total{result=\"l1_hit\",instance=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(franken_cache_lookup_total{instance=~\"$instance\"}[$__rate_interval])), 1e-9)", "legendFormat": "final L1 hit", "refId": "A" }],
+      "title": "Final L1 served ratio",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "mappings": [], "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "cellHeight": "sm", "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false }, "showHeader": true, "sortBy": [] },
+      "targets": [{ "expr": "franken_cache_build_info{instance=~\"$instance\"}", "format": "table", "instant": true, "legendFormat": "{{instance}} / {{version}}", "range": false, "refId": "A" }],
+      "title": "Build versions",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 1, "mappings": [], "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (result) (rate(franken_cache_lookup_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{result}}", "refId": "A" }],
+      "title": "Lookup rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 0, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum(franken_cache_degraded{instance=~\"$instance\"})", "legendFormat": "degraded pods", "refId": "A" }, { "expr": "sum(1 - franken_cache_invalidation_ready{instance=~\"$instance\"})", "legendFormat": "subscriber not ready", "refId": "B" }],
+      "title": "Unhealthy pod count",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "decimals": 1, "mappings": [], "max": 100, "min": 0, "unit": "percent" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 13 },
+      "id": 7,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "max(100 * franken_cache_l1_bytes{instance=~\"$instance\"} / clamp_min(franken_cache_l1_max_bytes{instance=~\"$instance\"}, 1))", "legendFormat": "worst pod", "refId": "A" }],
+      "title": "Max L1 memory utilization",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 0, "mappings": [], "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 13 },
+      "id": 8,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "franken_cache_l1_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}} used", "refId": "A" }, { "expr": "franken_cache_l1_max_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}} limit", "refId": "B" }],
+      "title": "L1 memory usage by pod",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 0, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "id": 9,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "franken_cache_l1_entries{instance=~\"$instance\"}", "legendFormat": "{{instance}} entries", "refId": "A" }],
+      "title": "L1 entries by pod",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 21 },
+      "id": 10,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum(rate(franken_cache_l1_evictions_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "evictions/s", "refId": "A" }],
+      "title": "L1 evictions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "Bps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 21 },
+      "id": 11,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum(rate(franken_cache_l1_evicted_bytes_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "evicted bytes/s", "refId": "A" }],
+      "title": "L1 evicted bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "id": 12,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(franken_cache_l2_operations_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{operation}}", "refId": "A" }],
+      "title": "L2 operation rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "id": 13,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "histogram_quantile(0.50, sum by (le, operation) (rate(franken_cache_l2_duration_seconds_bucket{operation=~\"get|get_many\",instance=~\"$instance\"}[$__rate_interval]))) * 1000", "legendFormat": "{{operation}} p50", "refId": "A" }, { "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(franken_cache_l2_duration_seconds_bucket{operation=~\"get|get_many\",instance=~\"$instance\"}[$__rate_interval]))) * 1000", "legendFormat": "{{operation}} p95", "refId": "B" }, { "expr": "histogram_quantile(0.99, sum by (le, operation) (rate(franken_cache_l2_duration_seconds_bucket{operation=~\"get|get_many\",instance=~\"$instance\"}[$__rate_interval]))) * 1000", "legendFormat": "{{operation}} p99", "refId": "C" }],
+      "title": "L2 read latency by operation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 37 },
+      "id": 14,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation, error_class) (rate(franken_cache_l2_errors_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{operation}} / {{error_class}}", "refId": "A" }],
+      "title": "L2 errors by operation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 37 },
+      "id": 15,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(franken_cache_batch_calls_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{operation}}", "refId": "A" }],
+      "title": "Batch calls",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 37 },
+      "id": 16,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(franken_cache_batch_items_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{operation}}", "refId": "A" }],
+      "title": "Batch items",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 45 },
+      "id": 17,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(franken_cache_batch_items_total{instance=~\"$instance\"}[$__rate_interval])) / clamp_min(sum by (operation) (rate(franken_cache_batch_calls_total{instance=~\"$instance\"}[$__rate_interval])), 1e-9)", "legendFormat": "{{operation}} items/call", "refId": "A" }],
+      "title": "Average batch size",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 45 },
+      "id": 18,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (direction, type, result) (rate(franken_cache_invalidation_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{direction}} / {{type}} / {{result}}", "refId": "A" }],
+      "title": "Pub/Sub activity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 53 },
+      "id": 19,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (stage) (rate(franken_cache_invalidation_subscriber_errors_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "{{stage}}", "refId": "A" }],
+      "title": "Pub/Sub subscriber errors",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
+      "id": 20,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum(franken_cache_pending_invalidations{instance=~\"$instance\"})", "legendFormat": "pending keys", "refId": "A" }, { "expr": "max(franken_cache_pending_flush{instance=~\"$instance\"})", "legendFormat": "pending flush", "refId": "B" }],
+      "title": "Coherence backlog",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+      "id": 21,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(franken_cache_post_commit_errors_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "post-commit / {{operation}}", "refId": "A" }, { "expr": "sum(rate(franken_cache_l1_mutation_errors_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "L1 mutation errors", "refId": "B" }, { "expr": "sum by (result) (rate(franken_cache_l1_flush_fallback_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "L1 fallback / {{result}}", "refId": "C" }],
+      "title": "Post-commit and L1 errors",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "decimals": 2, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "id": 22,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum(rate(franken_cache_recovery_attempts_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "attempts/s", "refId": "A" }, { "expr": "sum(rate(franken_cache_recovery_success_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "success/s", "refId": "B" }, { "expr": "sum(rate(franken_cache_recovery_failure_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "failure/s", "refId": "C" }, { "expr": "sum(rate(franken_cache_degraded_transitions_total{instance=~\"$instance\"}[$__rate_interval]))", "legendFormat": "degraded transitions/s", "refId": "D" }],
+      "title": "Recovery and degraded state",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["frankenphp", "tiered-cache", "prometheus"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": ["$__all"] },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(franken_cache_build_info, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": "label_values(franken_cache_build_info, instance)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "FrankenPHP Tiered Cache",
+  "uid": "frankenphp-tiered-cache",
+  "version": 2,
+  "weekStart": ""
+}

@@ -130,6 +130,7 @@ tasks:
         REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
         docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
         docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
+        IMAGE='{{.IMAGE}}' REDIS_NETWORK='{{.REDIS_NETWORK}}' bash tests/metrics.sh
 
   mod:tidy:
     desc: Synchronize go.mod and go.sum with the source code

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 type healthState uint32
@@ -47,6 +48,7 @@ func (c *TieredCache) transitionToDegraded(cause error) (bool, uint64) {
 	c.healthState.Store(uint32(degraded))
 	c.healthEpoch++
 	c.stateErr = cause
+	c.metrics.SetDegraded(true)
 
 	select {
 	case c.recoveryWake <- struct{}{}:
@@ -102,10 +104,13 @@ func (c *TieredCache) reconcileL1MutationErrorLocked(l1Err error) error {
 	if l1Err == nil {
 		return nil
 	}
+	c.metrics.ObserveL1MutationError()
 
 	if _, flushErr := flushL1(c.l1); flushErr == nil {
+		c.metrics.ObserveL1FlushFallback(observability.L1FlushFallbackSuccess)
 		return l1Err
 	} else {
+		c.metrics.ObserveL1FlushFallback(observability.L1FlushFallbackFailure)
 		combinedErr := errors.Join(l1Err, flushErr)
 		c.degradeLocked(combinedErr, false)
 		return combinedErr
@@ -125,6 +130,7 @@ func (c *TieredCache) enterHealthy(expectedEpoch uint64) bool {
 
 	c.healthState.Store(uint32(healthy))
 	c.stateErr = nil
+	c.metrics.SetDegraded(false)
 	return true
 }
 

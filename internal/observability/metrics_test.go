@@ -1,0 +1,233 @@
+package observability
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+func TestMetricsStateSnapshot(t *testing.T) {
+	state := new(MetricsState)
+
+	state.ObserveLookup(LookupL1Hit)
+	state.ObserveLookup(LookupL2Hit)
+	state.ObserveLookup(LookupMiss)
+	state.ObserveL1Miss()
+	errorClass := L2ErrorTransport
+	state.ObserveL2(OperationGet, 2*time.Millisecond, errorClass)
+	state.ObserveBatch(OperationGetMany, 3)
+	state.SetL1Usage(12, 1024)
+	state.SetL1Limits(64<<20, 4<<20)
+	state.ObserveL1Eviction(2, 128)
+	state.SetDegraded(true)
+	state.SetDegraded(true)
+	state.SetDegraded(false)
+	state.ObserveRecoveryAttempt()
+	state.ObserveRecoveryResult(true)
+	state.ObserveRecoveryResult(false)
+	state.SetInvalidationReady(true)
+	state.ObserveInvalidation(InvalidationPublished, InvalidationKey, InvalidationSuccess)
+	state.ObserveInvalidation(InvalidationReceived, InvalidationKey, InvalidationIgnoredSelf)
+	state.ObserveSubscriberError(SubscriberErrorSubscribe)
+	state.ObserveSubscriberError(SubscriberErrorReceive)
+	state.ObserveSubscriberError(SubscriberErrorApply)
+	state.SetPendingInvalidations(4)
+	state.SetPendingFlush(true)
+	state.ObservePostCommitError(OperationSet)
+	state.ObserveL1MutationError()
+	state.ObserveL1FlushFallback(L1FlushFallbackSuccess)
+	state.ObserveL1FlushFallback(L1FlushFallbackFailure)
+
+	snapshot := state.Snapshot()
+	if snapshot.Lookup != [LookupResultCount]uint64{1, 1, 1} {
+		t.Fatalf("lookup = %#v", snapshot.Lookup)
+	}
+	if snapshot.L1Misses != 1 {
+		t.Fatalf("L1 misses = %d, want 1", snapshot.L1Misses)
+	}
+	if snapshot.L2[OperationGet].Calls != 1 || snapshot.L2[OperationGet].Errors[L2ErrorTransport] != 1 {
+		t.Fatalf("get L2 snapshot = %#v", snapshot.L2[OperationGet])
+	}
+	if snapshot.L2[OperationGetMany].BatchCalls != 1 || snapshot.L2[OperationGetMany].BatchItems != 3 {
+		t.Fatalf("get_many batch snapshot = %#v", snapshot.L2[OperationGetMany])
+	}
+	if snapshot.L1Entries != 12 || snapshot.L1Bytes != 1024 || snapshot.L1Evictions != 2 || snapshot.L1EvictedBytes != 128 {
+		t.Fatalf("L1 snapshot = entries=%d bytes=%d evictions=%d evicted_bytes=%d", snapshot.L1Entries, snapshot.L1Bytes, snapshot.L1Evictions, snapshot.L1EvictedBytes)
+	}
+	if snapshot.Degraded || snapshot.DegradedTransitions != 1 {
+		t.Fatalf("health snapshot = degraded=%t transitions=%d", snapshot.Degraded, snapshot.DegradedTransitions)
+	}
+	if snapshot.RecoveryAttempts != 1 || snapshot.RecoverySuccesses != 1 || snapshot.RecoveryFailures != 1 {
+		t.Fatalf("recovery snapshot = attempts=%d successes=%d failures=%d", snapshot.RecoveryAttempts, snapshot.RecoverySuccesses, snapshot.RecoveryFailures)
+	}
+	if !snapshot.InvalidationReady ||
+		snapshot.Invalidation[InvalidationPublished][InvalidationKey][InvalidationSuccess] != 1 ||
+		snapshot.Invalidation[InvalidationReceived][InvalidationKey][InvalidationIgnoredSelf] != 1 {
+		t.Fatalf("invalidation snapshot = %#v", snapshot.Invalidation)
+	}
+	if snapshot.SubscriberErrors != [SubscriberErrorStageCount]uint64{1, 1, 1} {
+		t.Fatalf("subscriber errors = %#v", snapshot.SubscriberErrors)
+	}
+	if snapshot.PendingInvalidations != 4 || !snapshot.PendingFlush ||
+		snapshot.PostCommitErrors[OperationSet] != 1 || snapshot.L1MutationErrors != 1 ||
+		snapshot.L1FlushFallbacks != [L1FlushFallbackResultCount]uint64{1, 1} {
+		t.Fatalf("pending/error snapshot = %#v", snapshot)
+	}
+}
+
+func TestMetricsStateConcurrentUpdates(t *testing.T) {
+	state := new(MetricsState)
+	const goroutines = 8
+	const iterations = 1000
+
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				state.ObserveLookup(LookupL1Hit)
+				state.ObserveL2(OperationGet, time.Microsecond, L2ErrorNone)
+			}
+		}()
+	}
+	wg.Wait()
+
+	snapshot := state.Snapshot()
+	want := uint64(goroutines * iterations)
+	if snapshot.Lookup[LookupL1Hit] != want {
+		t.Fatalf("L1 hits = %d, want %d", snapshot.Lookup[LookupL1Hit], want)
+	}
+	if snapshot.L2[OperationGet].Calls != want {
+		t.Fatalf("L2 gets = %d, want %d", snapshot.L2[OperationGet].Calls, want)
+	}
+}
+
+func TestCollectorGatherConcurrentL2SnapshotInvariants(t *testing.T) {
+	state := new(MetricsState)
+	registry := prometheus.NewPedanticRegistry()
+	if err := registry.Register(NewCollector(state, "0.1.0")); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+
+	const (
+		writers    = 4
+		iterations = 2000
+	)
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := range iterations {
+				errorClass := L2ErrorNone
+				if i%3 == 0 {
+					errorClass = L2ErrorTransport
+				}
+				state.ObserveL2(OperationGet, time.Microsecond, errorClass)
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	close(start)
+
+	for {
+		families, err := registry.Gather()
+		if err != nil {
+			t.Fatalf("gather metrics: %v", err)
+		}
+
+		var calls float64
+		for _, family := range families {
+			if family.GetName() != "franken_cache_l2_operations_total" {
+				continue
+			}
+			for _, metric := range family.GetMetric() {
+				for _, label := range metric.GetLabel() {
+					if label.GetName() == "operation" && label.GetValue() == "get" {
+						calls = metric.GetCounter().GetValue()
+					}
+				}
+			}
+		}
+
+		for _, family := range families {
+			switch family.GetName() {
+			case "franken_cache_l2_duration_seconds":
+				for _, metric := range family.GetMetric() {
+					isGet := false
+					for _, label := range metric.GetLabel() {
+						isGet = isGet || label.GetName() == "operation" && label.GetValue() == "get"
+					}
+					if !isGet {
+						continue
+					}
+					for _, bucket := range metric.GetHistogram().GetBucket() {
+						if float64(bucket.GetCumulativeCount()) > calls {
+							t.Fatalf("histogram bucket count %d exceeds calls %g", bucket.GetCumulativeCount(), calls)
+						}
+					}
+				}
+			case "franken_cache_l2_errors_total":
+				for _, metric := range family.GetMetric() {
+					isGet := false
+					for _, label := range metric.GetLabel() {
+						isGet = isGet || label.GetName() == "operation" && label.GetValue() == "get"
+					}
+					if isGet && metric.GetCounter().GetValue() > calls {
+						t.Fatalf("error count %g exceeds calls %g", metric.GetCounter().GetValue(), calls)
+					}
+				}
+			}
+		}
+
+		select {
+		case <-done:
+			return
+		default:
+		}
+	}
+}
+
+func TestCollectorGather(t *testing.T) {
+	state := new(MetricsState)
+	state.ObserveLookup(LookupL1Hit)
+	state.ObserveL2(OperationGet, 2*time.Millisecond, L2ErrorNone)
+
+	registry := prometheus.NewPedanticRegistry()
+	if err := registry.Register(NewCollectorWithL1(state, "0.1.0", func() L1Snapshot {
+		return L1Snapshot{Entries: 2, Bytes: 128, MaxBytes: 1024, MaxItemBytes: 512}
+	})); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	seen := make(map[string]bool, len(families))
+	for _, family := range families {
+		seen[family.GetName()] = true
+	}
+	for _, name := range []string{
+		"franken_cache_build_info",
+		"franken_cache_lookup_total",
+		"franken_cache_l2_operations_total",
+		"franken_cache_l2_duration_seconds",
+		"franken_cache_invalidation_ready",
+		"franken_cache_invalidation_subscriber_errors_total",
+		"franken_cache_post_commit_errors_total",
+	} {
+		if !seen[name] {
+			t.Errorf("metric family %q was not gathered", name)
+		}
+	}
+}
