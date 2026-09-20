@@ -72,6 +72,12 @@ jobs:
           "$IMAGE"
           php-cli /opt/frankenphp-tiered-cache/tests/memory.php
 
+      - name: Run Prometheus metrics smoke test
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          REDIS_NETWORK: ${{ env.COMPOSE_PROJECT }}_default
+        run: bash tests/metrics.sh
+
       - name: Stop Redis
         if: always()
         run: docker compose -p "$COMPOSE_PROJECT" -f compose.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true

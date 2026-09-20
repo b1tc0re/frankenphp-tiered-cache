@@ -29,11 +29,14 @@ import (
 )
 
 var phpTieredCache cachecontract.Cache
+var phpTieredMetrics *observability.MetricsState
+var phpTieredL1Stats func() observability.L1Snapshot
 
 const phpTieredPressureLogInterval = 10 * time.Second
 
 type phpMemoryObserver struct {
 	reporter *observability.PressureReporter
+	metrics  *observability.MetricsState
 }
 
 //go:embed version.json
@@ -58,6 +61,7 @@ func extensionVersion() string {
 
 func (o *phpMemoryObserver) OnEviction(summary memory.EvictionSummary) {
 	o.reporter.Observe(summary.Entries, summary.Bytes)
+	o.metrics.ObserveL1Eviction(summary.Entries, summary.Bytes)
 }
 
 func init() {
@@ -77,10 +81,21 @@ func init() {
 		panic(fmt.Sprintf("franken_cache: initialize pressure reporter: %v", err))
 	}
 
-	l1, err := memory.New(memory.Config{Observer: &phpMemoryObserver{reporter: reporter}})
+	metricsState := new(observability.MetricsState)
+	metricsState.SetL1Limits(memory.DefaultMaxMemoryBytes, memory.DefaultMaxItemSizeBytes)
+	l1, err := memory.New(memory.Config{Observer: &phpMemoryObserver{reporter: reporter, metrics: metricsState}})
 	if err != nil {
 		reporter.Close()
 		panic(fmt.Sprintf("franken_cache: initialize MemoryCache: %v", err))
+	}
+	phpTieredL1Stats = func() observability.L1Snapshot {
+		stats := l1.Stats()
+		return observability.L1Snapshot{
+			Entries:      stats.Entries,
+			Bytes:        stats.Bytes,
+			MaxBytes:     stats.MaxBytes,
+			MaxItemBytes: stats.MaxItemBytes,
+		}
 	}
 
 	redisConfig, err := phpRedisConfigFromEnv()
@@ -113,6 +128,7 @@ func init() {
 		reporter.Close()
 		panic(fmt.Sprintf("franken_cache: parse TieredCache configuration: %v", err))
 	}
+	tieredConfig.Metrics = metricsState
 
 	cache, err := tieredcache.NewWithInvalidation(tieredConfig, l1, l2, bus)
 	if err != nil {
@@ -123,6 +139,7 @@ func init() {
 		panic(fmt.Sprintf("franken_cache: initialize TieredCache: %v", err))
 	}
 	phpTieredCache = cache
+	phpTieredMetrics = metricsState
 
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.franken_cache_module_entry))
 }

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 const (
@@ -22,6 +24,7 @@ var (
 // of this type.
 type Config struct {
 	RecoveryInterval time.Duration
+	Metrics          *observability.MetricsState
 }
 
 func (c Config) normalized() (Config, error) {

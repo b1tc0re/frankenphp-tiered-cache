@@ -37,6 +37,7 @@ type MemoryCache struct {
 	maxItemSize int64
 	observer    Observer
 	current     atomic.Int64
+	entries     atomic.Int64
 	lruClock    atomic.Uint64
 	evictionMu  sync.Mutex
 	lruSamples  int
@@ -47,10 +48,28 @@ type MemoryCache struct {
 	closeOnce       sync.Once
 }
 
+// Stats is a read-only snapshot of the atomically maintained MemoryCache
+// accounting state. It is intended for scrape-time observability only.
+type Stats struct {
+	Entries      int64
+	Bytes        int64
+	MaxBytes     int64
+	MaxItemBytes int64
+}
+
 var _ cachecontract.Cache = (*MemoryCache)(nil)
 
 func New(config Config) (*MemoryCache, error) {
 	return newMemoryCache(config, defaultShardCount, defaultLRUSamples)
+}
+
+func (c *MemoryCache) Stats() Stats {
+	return Stats{
+		Entries:      c.entries.Load(),
+		Bytes:        c.current.Load(),
+		MaxBytes:     c.maxMemory,
+		MaxItemBytes: c.maxItemSize,
+	}
 }
 
 func newMemoryCache(config Config, shardCount, lruSamples int) (*MemoryCache, error) {
@@ -166,6 +185,7 @@ func (c *MemoryCache) Add(key string, value []byte, ttl time.Duration) (bool, er
 
 			delete(shard.entries, key)
 			c.current.Add(-old.cost)
+			c.entries.Add(-1)
 		}
 
 		if c.tryReserve(cost) {
@@ -176,6 +196,7 @@ func (c *MemoryCache) Add(key string, value []byte, ttl time.Duration) (bool, er
 			}
 			c.recordAccess(entry)
 			shard.entries[key] = entry
+			c.entries.Add(1)
 			shard.mu.Unlock()
 			return true, nil
 		}
@@ -262,6 +283,7 @@ func (c *MemoryCache) Forget(key string) (bool, error) {
 	now := c.now()
 	delete(shard.entries, key)
 	c.current.Add(-entry.cost)
+	c.entries.Add(-1)
 	expired := isExpired(entry.expiresAt, now)
 	shard.mu.Unlock()
 	return !expired, nil
@@ -285,6 +307,7 @@ func (c *MemoryCache) Touch(key string, ttl time.Duration) (bool, error) {
 	if isExpired(entry.expiresAt, now) {
 		delete(shard.entries, key)
 		c.current.Add(-entry.cost)
+		c.entries.Add(-1)
 		shard.mu.Unlock()
 		return false, nil
 	}
@@ -319,6 +342,7 @@ func (c *MemoryCache) Flush() (bool, error) {
 		c.shards[i].entries = make(map[string]*memoryEntry)
 	}
 	c.current.Store(0)
+	c.entries.Store(0)
 	for i := len(c.shards) - 1; i >= 0; i-- {
 		c.shards[i].mu.Unlock()
 	}
@@ -367,6 +391,9 @@ func (c *MemoryCache) set(key string, value []byte, ttl time.Duration, forever b
 			}
 			c.recordAccess(entry)
 			shard.entries[key] = entry
+			if old == nil {
+				c.entries.Add(1)
+			}
 			if delta < 0 {
 				c.current.Add(delta)
 			}
@@ -392,6 +419,7 @@ func (c *MemoryCache) changeCounter(key string, value int64, decrement bool) (in
 		if entry != nil && isExpired(entry.expiresAt, c.now()) {
 			delete(shard.entries, key)
 			c.current.Add(-entry.cost)
+			c.entries.Add(-1)
 			entry = nil
 		}
 
@@ -436,6 +464,9 @@ func (c *MemoryCache) changeCounter(key string, value int64, decrement bool) (in
 			}
 			c.recordAccess(newEntry)
 			shard.entries[key] = newEntry
+			if entry == nil {
+				c.entries.Add(1)
+			}
 			if delta < 0 {
 				c.current.Add(delta)
 			}
@@ -593,6 +624,7 @@ func (c *MemoryCache) purgeExpiredShard(shard *memoryShard, now time.Time) {
 		if isExpired(entry.expiresAt, now) {
 			delete(shard.entries, key)
 			c.current.Add(-entry.cost)
+			c.entries.Add(-1)
 		}
 	}
 	shard.mu.Unlock()
@@ -677,6 +709,7 @@ func (c *MemoryCache) tryEvictCandidate(candidate *evictionCandidate) evictionRe
 	cost := current.cost
 	delete(candidate.shard.entries, candidate.key)
 	c.current.Add(-cost)
+	c.entries.Add(-1)
 	candidate.shard.mu.Unlock()
 
 	return evictionResult{removed: true, live: !expired, bytes: cost}
@@ -688,6 +721,7 @@ func (c *MemoryCache) deleteExpired(shard *memoryShard, key string, expected *me
 	if ok && current == expected && isExpired(current.expiresAt, now) {
 		delete(shard.entries, key)
 		c.current.Add(-current.cost)
+		c.entries.Add(-1)
 	}
 	shard.mu.Unlock()
 }

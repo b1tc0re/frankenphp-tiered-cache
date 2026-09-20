@@ -41,6 +41,42 @@ PHP / FrankenPHP workers
 обновления L1 или публикации Pub/Sub не откатывает Redis: TieredCache сохраняет
 pending invalidation и пытается доставить её во время recovery.
 
+### Prometheus metrics
+
+Метрики подключаются отдельным Caddy global option. Добавьте его в глобальный
+блок Caddyfile:
+
+```caddyfile
+{
+	franken_cache_metrics
+	admin 0.0.0.0:2019
+}
+```
+
+После этого collector регистрируется в metrics registry текущего Caddy context,
+а стандартный Caddy admin endpoint отдаёт его по `/metrics`:
+
+```bash
+curl http://127.0.0.1:2019/metrics
+```
+
+Если admin API отключён или слушает на другом адресе/порту, используйте ваш
+фактический admin endpoint. `franken_cache_metrics` не поднимает отдельный HTTP
+сервер и не использует глобальный Prometheus registerer. Поэтому при Caddy
+reload новый collector регистрируется в новом context без повторной регистрации
+в старом registry.
+
+Основные группы метрик:
+
+- lookup L1/L2 и cache misses;
+- операции, ошибки и latency Redis L2, включая batch operations;
+- entries, bytes, limits и pressure evictions L1;
+- degraded/recovery и состояние Pub/Sub invalidation;
+- post-commit и ошибки обновления L1.
+
+Метрики собираются из атомарного process-local состояния. Prometheus objects не
+создаются на пути `Get`/`Set`; значения формируются только во время scrape.
+
 ### TTL и expiration
 
 TTL задаётся как относительное время жизни записи. Значения `ttl <= 0` не используются как специальное значение для вечного хранения: для этого есть отдельная операция `Forever`.
@@ -380,9 +416,11 @@ task test:integration
 `task test:integration` поднимает зафиксированный в `compose.yaml` Redis
 `7-alpine`, запускает Go-тест с двумя независимыми L1 и двумя Redis L2/Pub/Sub
 connections, затем собирает FrankenPHP image и запускает PHP bridge smoke-тесты.
-Все проверки используют один Redis-контейнер. После завершения или ошибки Redis,
-Compose-сеть и volume автоматически удаляются. Локальный Docker image сохраняется
-для повторного запуска и удаляется отдельной командой `task clean`.
+После этого запускается Caddy smoke-тест Prometheus `/metrics` с включённым
+`franken_cache_metrics`. Все проверки используют один Redis-контейнер. После
+завершения или ошибки Redis, Compose-сеть и volume автоматически удаляются.
+Локальный Docker image сохраняется для повторного запуска и удаляется отдельной
+командой `task clean`.
 
 Тот же тест можно запускать без Docker, если Redis уже доступен:
 

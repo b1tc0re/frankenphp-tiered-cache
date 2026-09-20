@@ -6,6 +6,7 @@ import (
 	"time"
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 func (c *TieredCache) Set(key string, value []byte, ttl time.Duration) (bool, error) {
@@ -39,8 +40,10 @@ func (c *TieredCache) Add(key string, value []byte, ttl time.Duration) (bool, er
 		return false, err
 	}
 
-	deadline := time.Now().Add(ttl)
+	started := time.Now()
+	deadline := started.Add(ttl)
 	added, l2Err := c.l2.Add(key, value, ttl)
+	c.observeL2(observability.OperationAdd, started, l2Err)
 	if l2Err != nil {
 		c.degradeLocked(l2Err, false)
 		return false, c.unavailableError()
@@ -73,6 +76,7 @@ func (c *TieredCache) Add(key string, value []byte, ttl time.Duration) (bool, er
 	}
 	if l1Err != nil || publishErr != nil {
 		postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+		c.observePostCommitError(postCommitErr)
 		return true, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
 	}
 	return true, nil
@@ -104,8 +108,11 @@ func (c *TieredCache) SetMany(values map[string][]byte, ttl time.Duration) (bool
 		return false, err
 	}
 
-	deadline := time.Now().Add(ttl)
+	started := time.Now()
+	deadline := started.Add(ttl)
 	stored, l2Err := c.l2.SetMany(values, ttl)
+	c.observeL2(observability.OperationSetMany, started, l2Err)
+	c.observeBatch(observability.OperationSetMany, len(values))
 	if l2Err != nil {
 		c.degradeLocked(l2Err, false)
 		return false, c.unavailableError()
@@ -150,6 +157,7 @@ func (c *TieredCache) SetMany(values map[string][]byte, ttl time.Duration) (bool
 
 	if l1Err != nil || publishErr != nil {
 		postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+		c.observePostCommitError(postCommitErr)
 		return true, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
 	}
 	return true, nil
@@ -189,10 +197,16 @@ func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (in
 
 	var result int64
 	var l2Err error
+	started := time.Now()
 	if decrement {
 		result, l2Err = c.l2.Decrement(key, value)
 	} else {
 		result, l2Err = c.l2.Increment(key, value)
+	}
+	if decrement {
+		c.observeL2(observability.OperationDecrement, started, l2Err)
+	} else {
+		c.observeL2(observability.OperationIncrement, started, l2Err)
 	}
 	if l2Err != nil {
 		if errors.Is(l2Err, cachecontract.ErrRedisCommand) {
@@ -216,6 +230,7 @@ func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (in
 
 	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
 	if postCommitErr != nil {
+		c.observePostCommitError(postCommitErr)
 		return result, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
 	}
 	return result, nil
@@ -232,9 +247,10 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 		return false, err
 	}
 
+	started := time.Now()
 	var deadline time.Time
 	if !forever {
-		deadline = time.Now().Add(ttl)
+		deadline = started.Add(ttl)
 	}
 
 	var stored bool
@@ -243,6 +259,11 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 		stored, l2Err = c.l2.Forever(key, value)
 	} else {
 		stored, l2Err = c.l2.Set(key, value, ttl)
+	}
+	if forever {
+		c.observeL2(observability.OperationForever, started, l2Err)
+	} else {
+		c.observeL2(observability.OperationSet, started, l2Err)
 	}
 	if l2Err != nil {
 		c.degradeLocked(l2Err, false)
@@ -279,7 +300,9 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 		c.degradeLocked(publishErr, true)
 	}
 	if l1Err != nil || publishErr != nil {
-		return true, errors.Join(l1Err, c.unavailableError())
+		postCommitErr := errors.Join(l1Err, c.unavailableError())
+		c.observePostCommitError(postCommitErr)
+		return true, postCommitErr
 	}
 	return true, nil
 }
@@ -295,7 +318,9 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 		return false, err
 	}
 
+	started := time.Now()
 	l2Removed, l2Err := c.l2.Forget(key)
+	c.observeL2(observability.OperationForget, started, l2Err)
 	if l2Err != nil {
 		c.degradeLocked(l2Err, false)
 		return false, c.unavailableError()
@@ -308,7 +333,9 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 		c.markPendingInvalidation(key)
 		c.degradeLocked(publishErr, true)
 	}
-	return l1Removed || l2Removed, errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	c.observePostCommitError(postCommitErr)
+	return l1Removed || l2Removed, postCommitErr
 }
 
 func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
@@ -326,8 +353,10 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		return false, err
 	}
 
-	deadline := time.Now().Add(ttl)
+	started := time.Now()
+	deadline := started.Add(ttl)
 	l2Touched, l2Err := c.l2.Touch(key, ttl)
+	c.observeL2(observability.OperationTouch, started, l2Err)
 	if l2Err != nil {
 		c.degradeLocked(l2Err, true)
 		return false, c.unavailableError()
@@ -354,7 +383,9 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		c.markPendingInvalidation(key)
 		c.degradeLocked(publishErr, true)
 	}
-	return l2Touched || l1Touched, errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	c.observePostCommitError(postCommitErr)
+	return l2Touched || l1Touched, postCommitErr
 }
 
 func (c *TieredCache) Flush() (bool, error) {
@@ -368,7 +399,9 @@ func (c *TieredCache) Flush() (bool, error) {
 		return false, err
 	}
 
+	started := time.Now()
 	l2Flushed, l2Err := c.l2.Flush()
+	c.observeL2(observability.OperationFlush, started, l2Err)
 	if l2Err != nil {
 		c.degradeLocked(l2Err, false)
 		return false, c.unavailableError()

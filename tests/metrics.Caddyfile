@@ -1,0 +1,8 @@
+{
+	franken_cache_metrics
+	admin 0.0.0.0:2019
+}
+
+:8080 {
+	respond "ok"
+}
