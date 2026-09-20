@@ -288,15 +288,23 @@ type Snapshot struct {
 }
 
 func (m *MetricsState) ObserveLookup(result LookupResult) {
+	m.ObserveLookups(result, 1)
+}
+
+func (m *MetricsState) ObserveLookups(result LookupResult, count uint64) {
 	if m == nil || result >= LookupResultCount {
 		return
 	}
-	m.lookup[result].Add(1)
+	m.lookup[result].Add(count)
 }
 
 func (m *MetricsState) ObserveL1Miss() {
+	m.ObserveL1Misses(1)
+}
+
+func (m *MetricsState) ObserveL1Misses(count uint64) {
 	if m != nil {
-		m.l1Misses.Add(1)
+		m.l1Misses.Add(count)
 	}
 }
 

@@ -83,6 +83,31 @@ func TestTieredMetricsCountExpiredL2ValueAsMiss(t *testing.T) {
 	}
 }
 
+func TestTieredMetricsAggregateDuplicateGetManyKeys(t *testing.T) {
+	metrics := new(observability.MetricsState)
+	l1 := newFakeCache()
+	l1.put("warm", []byte("l1"), time.Minute)
+	l2 := newFakeCache()
+	l2.put("cold", []byte("l2"), time.Minute)
+	cache := newTestTieredCache(t, Config{Metrics: metrics}, l1, l2)
+
+	result, err := cache.GetMany([]string{"warm", "warm", "cold", "cold", "missing", "missing"})
+	if err != nil {
+		t.Fatalf("GetMany() error = %v", err)
+	}
+	if len(result) != 2 || string(result["warm"].Value) != "l1" || string(result["cold"].Value) != "l2" {
+		t.Fatalf("GetMany() = %#v, want warm and cold values", result)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.Lookup[observability.LookupL1Hit] != 2 || snapshot.Lookup[observability.LookupL2Hit] != 2 || snapshot.Lookup[observability.LookupMiss] != 2 {
+		t.Fatalf("lookup metrics = %#v, want 2 hits per result class", snapshot.Lookup)
+	}
+	if snapshot.L1Misses != 4 {
+		t.Fatalf("L1 misses = %d, want 4", snapshot.L1Misses)
+	}
+}
+
 func TestTieredMetricsInvalidationErrorClearsReadyGauge(t *testing.T) {
 	metrics := new(observability.MetricsState)
 	bus := newFakeInvalidationBus()
