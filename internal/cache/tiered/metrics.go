@@ -17,8 +17,6 @@ func (c *TieredCache) observeL2(operation observability.Operation, started time.
 		errorClass := observability.L2ErrorTransport
 		if errors.Is(err, cachecontract.ErrRedisCommand) {
 			errorClass = observability.L2ErrorCommand
-		} else if errors.Is(err, ErrPostCommit) {
-			errorClass = observability.L2ErrorPostCommit
 		}
 		class = errorClass
 	}
@@ -31,8 +29,8 @@ func (c *TieredCache) observeBatch(operation observability.Operation, items int)
 	}
 }
 
-func (c *TieredCache) observePostCommitError(err error) {
-	if err != nil {
-		c.metrics.ObservePostCommitError()
+func (c *TieredCache) observePostCommitError(operation observability.Operation, err error) {
+	if c.metrics != nil && err != nil {
+		c.metrics.ObservePostCommitError(operation)
 	}
 }

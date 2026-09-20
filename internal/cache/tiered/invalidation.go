@@ -139,6 +139,7 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 			if ctx.Err() != nil || c.isClosed() {
 				return
 			}
+			c.metrics.ObserveSubscriberError(observability.SubscriberErrorSubscribe)
 			c.degradeAndFlush(err)
 			if !waitForRetry(ctx, c.recoveryInterval) {
 				return
@@ -169,6 +170,7 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 				if ctx.Err() != nil || c.isClosed() {
 					return
 				}
+				c.metrics.ObserveSubscriberError(observability.SubscriberErrorReceive)
 				c.degradeAndFlush(receiveErr)
 				break
 			}
@@ -180,6 +182,7 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 				if ctx.Err() != nil || c.isClosed() {
 					return
 				}
+				c.metrics.ObserveSubscriberError(observability.SubscriberErrorApply)
 				c.degradeAndFlush(err)
 				break
 			}
@@ -221,7 +224,7 @@ func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
 		typ = observability.InvalidationFlush
 	}
 	if event.Origin == c.invalidationOrigin {
-		c.metrics.ObserveInvalidation(observability.InvalidationReceived, typ, observability.InvalidationSuccess)
+		c.metrics.ObserveInvalidation(observability.InvalidationReceived, typ, observability.InvalidationIgnoredSelf)
 		return nil
 	}
 

@@ -33,6 +33,7 @@ type Collector struct {
 	recoveryFailures     *prometheus.Desc
 	invalidation         *prometheus.Desc
 	invalidationReady    *prometheus.Desc
+	subscriberErrors     *prometheus.Desc
 	pendingInvalidations *prometheus.Desc
 	pendingFlush         *prometheus.Desc
 	postCommitErrors     *prometheus.Desc
@@ -129,7 +130,7 @@ func newCollector(state *MetricsState, version string, l1Stats func() L1Snapshot
 		),
 		degradedTransitions: prometheus.NewDesc(
 			namespace+"_degraded_transitions_total",
-			"TieredCache health state transitions.", nil, nil,
+			"Entries into the TieredCache degraded state.", nil, nil,
 		),
 		recoveryAttempts: prometheus.NewDesc(
 			namespace+"_recovery_attempts_total",
@@ -151,6 +152,10 @@ func newCollector(state *MetricsState, version string, l1Stats func() L1Snapshot
 			namespace+"_invalidation_ready",
 			"Whether the Pub/Sub subscription is currently ready.", nil, nil,
 		),
+		subscriberErrors: prometheus.NewDesc(
+			namespace+"_invalidation_subscriber_errors_total",
+			"Redis Pub/Sub subscriber errors by stage.", []string{"stage"}, nil,
+		),
 		pendingInvalidations: prometheus.NewDesc(
 			namespace+"_pending_invalidations",
 			"Number of pending invalidation keys awaiting retry.", nil, nil,
@@ -161,7 +166,7 @@ func newCollector(state *MetricsState, version string, l1Stats func() L1Snapshot
 		),
 		postCommitErrors: prometheus.NewDesc(
 			namespace+"_post_commit_errors_total",
-			"Errors reported after an authoritative Redis mutation committed.", nil, nil,
+			"Errors reported after an authoritative Redis mutation committed.", []string{"operation"}, nil,
 		),
 		l1MutationErrors: prometheus.NewDesc(
 			namespace+"_l1_mutation_errors_total",
@@ -197,6 +202,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 		c.recoveryFailures,
 		c.invalidation,
 		c.invalidationReady,
+		c.subscriberErrors,
 		c.pendingInvalidations,
 		c.pendingFlush,
 		c.postCommitErrors,
@@ -277,7 +283,14 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		pendingFlush = 1
 	}
 	ch <- prometheus.MustNewConstMetric(c.pendingFlush, prometheus.GaugeValue, pendingFlush)
-	ch <- prometheus.MustNewConstMetric(c.postCommitErrors, prometheus.CounterValue, float64(snapshot.PostCommitErrors))
+	for operation := OperationSet; operation <= OperationDecrement; operation++ {
+		ch <- prometheus.MustNewConstMetric(
+			c.postCommitErrors,
+			prometheus.CounterValue,
+			float64(snapshot.PostCommitErrors[operation]),
+			operation.String(),
+		)
+	}
 	ch <- prometheus.MustNewConstMetric(c.l1MutationErrors, prometheus.CounterValue, float64(snapshot.L1MutationErrors))
 	for result := L1FlushFallbackResult(0); result < L1FlushFallbackResultCount; result++ {
 		ch <- prometheus.MustNewConstMetric(
@@ -285,6 +298,14 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(snapshot.L1FlushFallbacks[result]),
 			result.String(),
+		)
+	}
+	for stage := SubscriberErrorStage(0); stage < SubscriberErrorStageCount; stage++ {
+		ch <- prometheus.MustNewConstMetric(
+			c.subscriberErrors,
+			prometheus.CounterValue,
+			float64(snapshot.SubscriberErrors[stage]),
+			stage.String(),
 		)
 	}
 }

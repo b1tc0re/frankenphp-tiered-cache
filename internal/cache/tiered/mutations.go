@@ -76,7 +76,7 @@ func (c *TieredCache) Add(key string, value []byte, ttl time.Duration) (bool, er
 	}
 	if l1Err != nil || publishErr != nil {
 		postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
-		c.observePostCommitError(postCommitErr)
+		c.observePostCommitError(observability.OperationAdd, postCommitErr)
 		return true, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
 	}
 	return true, nil
@@ -157,7 +157,7 @@ func (c *TieredCache) SetMany(values map[string][]byte, ttl time.Duration) (bool
 
 	if l1Err != nil || publishErr != nil {
 		postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
-		c.observePostCommitError(postCommitErr)
+		c.observePostCommitError(observability.OperationSetMany, postCommitErr)
 		return true, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
 	}
 	return true, nil
@@ -230,7 +230,11 @@ func (c *TieredCache) changeCounter(key string, value int64, decrement bool) (in
 
 	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
 	if postCommitErr != nil {
-		c.observePostCommitError(postCommitErr)
+		operation := observability.OperationIncrement
+		if decrement {
+			operation = observability.OperationDecrement
+		}
+		c.observePostCommitError(operation, postCommitErr)
 		return result, fmt.Errorf("%w: %w", ErrPostCommit, postCommitErr)
 	}
 	return result, nil
@@ -301,7 +305,11 @@ func (c *TieredCache) set(key string, value []byte, ttl time.Duration, forever b
 	}
 	if l1Err != nil || publishErr != nil {
 		postCommitErr := errors.Join(l1Err, c.unavailableError())
-		c.observePostCommitError(postCommitErr)
+		operation := observability.OperationSet
+		if forever {
+			operation = observability.OperationForever
+		}
+		c.observePostCommitError(operation, postCommitErr)
 		return true, postCommitErr
 	}
 	return true, nil
@@ -334,7 +342,7 @@ func (c *TieredCache) Forget(key string) (bool, error) {
 		c.degradeLocked(publishErr, true)
 	}
 	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
-	c.observePostCommitError(postCommitErr)
+	c.observePostCommitError(observability.OperationForget, postCommitErr)
 	return l1Removed || l2Removed, postCommitErr
 }
 
@@ -384,7 +392,7 @@ func (c *TieredCache) Touch(key string, ttl time.Duration) (bool, error) {
 		c.degradeLocked(publishErr, true)
 	}
 	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
-	c.observePostCommitError(postCommitErr)
+	c.observePostCommitError(observability.OperationTouch, postCommitErr)
 	return l2Touched || l1Touched, postCommitErr
 }
 
@@ -416,5 +424,7 @@ func (c *TieredCache) Flush() (bool, error) {
 		c.markPendingFlush()
 		c.degradeLocked(publishErr, true)
 	}
-	return l1Flushed && l2Flushed && l1Err == nil && publishErr == nil, errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	postCommitErr := errors.Join(l1Err, c.unavailableErrorIf(errors.Join(l1Err, publishErr)))
+	c.observePostCommitError(observability.OperationFlush, postCommitErr)
+	return l1Flushed && l2Flushed && l1Err == nil && publishErr == nil, postCommitErr
 }

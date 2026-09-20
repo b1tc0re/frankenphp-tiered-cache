@@ -29,9 +29,13 @@ func TestMetricsStateSnapshot(t *testing.T) {
 	state.ObserveRecoveryResult(false)
 	state.SetInvalidationReady(true)
 	state.ObserveInvalidation(InvalidationPublished, InvalidationKey, InvalidationSuccess)
+	state.ObserveInvalidation(InvalidationReceived, InvalidationKey, InvalidationIgnoredSelf)
+	state.ObserveSubscriberError(SubscriberErrorSubscribe)
+	state.ObserveSubscriberError(SubscriberErrorReceive)
+	state.ObserveSubscriberError(SubscriberErrorApply)
 	state.SetPendingInvalidations(4)
 	state.SetPendingFlush(true)
-	state.ObservePostCommitError()
+	state.ObservePostCommitError(OperationSet)
 	state.ObserveL1MutationError()
 	state.ObserveL1FlushFallback(L1FlushFallbackSuccess)
 	state.ObserveL1FlushFallback(L1FlushFallbackFailure)
@@ -52,16 +56,23 @@ func TestMetricsStateSnapshot(t *testing.T) {
 	if snapshot.L1Entries != 12 || snapshot.L1Bytes != 1024 || snapshot.L1Evictions != 2 || snapshot.L1EvictedBytes != 128 {
 		t.Fatalf("L1 snapshot = entries=%d bytes=%d evictions=%d evicted_bytes=%d", snapshot.L1Entries, snapshot.L1Bytes, snapshot.L1Evictions, snapshot.L1EvictedBytes)
 	}
-	if snapshot.Degraded || snapshot.DegradedTransitions != 2 {
+	if snapshot.Degraded || snapshot.DegradedTransitions != 1 {
 		t.Fatalf("health snapshot = degraded=%t transitions=%d", snapshot.Degraded, snapshot.DegradedTransitions)
 	}
 	if snapshot.RecoveryAttempts != 1 || snapshot.RecoverySuccesses != 1 || snapshot.RecoveryFailures != 1 {
 		t.Fatalf("recovery snapshot = attempts=%d successes=%d failures=%d", snapshot.RecoveryAttempts, snapshot.RecoverySuccesses, snapshot.RecoveryFailures)
 	}
-	if !snapshot.InvalidationReady || snapshot.Invalidation[InvalidationPublished][InvalidationKey][InvalidationSuccess] != 1 {
+	if !snapshot.InvalidationReady ||
+		snapshot.Invalidation[InvalidationPublished][InvalidationKey][InvalidationSuccess] != 1 ||
+		snapshot.Invalidation[InvalidationReceived][InvalidationKey][InvalidationIgnoredSelf] != 1 {
 		t.Fatalf("invalidation snapshot = %#v", snapshot.Invalidation)
 	}
-	if snapshot.PendingInvalidations != 4 || !snapshot.PendingFlush || snapshot.PostCommitErrors != 1 || snapshot.L1MutationErrors != 1 || snapshot.L1FlushFallbacks != [L1FlushFallbackResultCount]uint64{1, 1} {
+	if snapshot.SubscriberErrors != [SubscriberErrorStageCount]uint64{1, 1, 1} {
+		t.Fatalf("subscriber errors = %#v", snapshot.SubscriberErrors)
+	}
+	if snapshot.PendingInvalidations != 4 || !snapshot.PendingFlush ||
+		snapshot.PostCommitErrors[OperationSet] != 1 || snapshot.L1MutationErrors != 1 ||
+		snapshot.L1FlushFallbacks != [L1FlushFallbackResultCount]uint64{1, 1} {
 		t.Fatalf("pending/error snapshot = %#v", snapshot)
 	}
 }
@@ -120,6 +131,8 @@ func TestCollectorGather(t *testing.T) {
 		"franken_cache_l2_operations_total",
 		"franken_cache_l2_duration_seconds",
 		"franken_cache_invalidation_ready",
+		"franken_cache_invalidation_subscriber_errors_total",
+		"franken_cache_post_commit_errors_total",
 	} {
 		if !seen[name] {
 			t.Errorf("metric family %q was not gathered", name)

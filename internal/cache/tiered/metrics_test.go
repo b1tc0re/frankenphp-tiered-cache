@@ -123,6 +123,47 @@ func TestTieredMetricsInvalidationErrorClearsReadyGauge(t *testing.T) {
 	}
 	bus.mu.Unlock()
 	waitForInvalidationCondition(t, func() bool { return !metrics.Snapshot().InvalidationReady })
+	if got := metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorApply]; got != 1 {
+		t.Fatalf("subscriber apply errors = %d, want 1", got)
+	}
+}
+
+func TestTieredMetricsRecordSelfInvalidationAsIgnored(t *testing.T) {
+	metrics := new(observability.MetricsState)
+	cache := newTestTieredCache(t, Config{Metrics: metrics}, newFakeCache(), newFakeCache())
+	cache.invalidationOrigin = "local-origin"
+
+	err := cache.applyInvalidation(cacheinvalidation.Event{
+		Version: cacheinvalidation.ProtocolVersion,
+		Type:    cacheinvalidation.EventTypeInvalidate,
+		Key:     "key",
+		Origin:  "local-origin",
+	})
+	if err != nil {
+		t.Fatalf("applyInvalidation() error = %v", err)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.Invalidation[observability.InvalidationReceived][observability.InvalidationKey][observability.InvalidationIgnoredSelf] != 1 {
+		t.Fatalf("self invalidations = %#v, want ignored_self=1", snapshot.Invalidation)
+	}
+	if snapshot.Invalidation[observability.InvalidationReceived][observability.InvalidationKey][observability.InvalidationSuccess] != 0 {
+		t.Fatalf("self invalidation was counted as success: %#v", snapshot.Invalidation)
+	}
+}
+
+func TestTieredMetricsRecordFlushPostCommitError(t *testing.T) {
+	metrics := new(observability.MetricsState)
+	l1 := newFakeCache()
+	l1.flushErr = errors.New("L1 flush failed")
+	cache := newTestTieredCache(t, Config{Metrics: metrics}, l1, newFakeCache())
+
+	if ok, err := cache.Flush(); ok || err == nil {
+		t.Fatalf("Flush() = (%t, %v), want post-commit error", ok, err)
+	}
+	if got := metrics.Snapshot().PostCommitErrors[observability.OperationFlush]; got != 1 {
+		t.Fatalf("flush post-commit errors = %d, want 1", got)
+	}
 }
 
 func TestTieredMetricsRecordL1FallbackResults(t *testing.T) {

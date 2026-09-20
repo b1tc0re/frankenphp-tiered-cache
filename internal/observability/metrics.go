@@ -89,8 +89,6 @@ const L2ErrorNone L2ErrorClass = ^L2ErrorClass(0)
 const (
 	L2ErrorTransport L2ErrorClass = iota
 	L2ErrorCommand
-	L2ErrorPostCommit
-	L2ErrorInternal
 	L2ErrorClassCount
 )
 
@@ -100,10 +98,6 @@ func (c L2ErrorClass) String() string {
 		return "transport"
 	case L2ErrorCommand:
 		return "command"
-	case L2ErrorPostCommit:
-		return "post_commit"
-	case L2ErrorInternal:
-		return "internal"
 	default:
 		return "unknown"
 	}
@@ -152,6 +146,7 @@ type InvalidationResult uint8
 const (
 	InvalidationSuccess InvalidationResult = iota
 	InvalidationError
+	InvalidationIgnoredSelf
 	InvalidationResultCount
 )
 
@@ -161,6 +156,30 @@ func (r InvalidationResult) String() string {
 		return "success"
 	case InvalidationError:
 		return "error"
+	case InvalidationIgnoredSelf:
+		return "ignored_self"
+	default:
+		return "unknown"
+	}
+}
+
+type SubscriberErrorStage uint8
+
+const (
+	SubscriberErrorSubscribe SubscriberErrorStage = iota
+	SubscriberErrorReceive
+	SubscriberErrorApply
+	SubscriberErrorStageCount
+)
+
+func (s SubscriberErrorStage) String() string {
+	switch s {
+	case SubscriberErrorSubscribe:
+		return "subscribe"
+	case SubscriberErrorReceive:
+		return "receive"
+	case SubscriberErrorApply:
+		return "apply"
 	default:
 		return "unknown"
 	}
@@ -242,10 +261,11 @@ type MetricsState struct {
 
 	invalidationReady    atomic.Uint32
 	invalidation         [InvalidationDirectionCount][InvalidationTypeCount][InvalidationResultCount]atomic.Uint64
+	subscriberErrors     [SubscriberErrorStageCount]atomic.Uint64
 	pendingInvalidations atomic.Uint64
 	pendingFlush         atomic.Uint32
 
-	postCommitErrors atomic.Uint64
+	postCommitErrors [OperationCount]atomic.Uint64
 	l1MutationErrors atomic.Uint64
 	l1FlushFallbacks [L1FlushFallbackResultCount]atomic.Uint64
 }
@@ -279,10 +299,11 @@ type Snapshot struct {
 
 	InvalidationReady    bool
 	Invalidation         [InvalidationDirectionCount][InvalidationTypeCount][InvalidationResultCount]uint64
+	SubscriberErrors     [SubscriberErrorStageCount]uint64
 	PendingInvalidations uint64
 	PendingFlush         bool
 
-	PostCommitErrors uint64
+	PostCommitErrors [OperationCount]uint64
 	L1MutationErrors uint64
 	L1FlushFallbacks [L1FlushFallbackResultCount]uint64
 }
@@ -373,13 +394,27 @@ func (m *MetricsState) SetDegraded(value bool) {
 	if m == nil {
 		return
 	}
-	wanted := uint32(0)
 	if value {
-		wanted = 1
+		if m.degraded.CompareAndSwap(0, 1) {
+			m.degradedTransitions.Add(1)
+		}
+		return
 	}
-	if m.degraded.Swap(wanted) != wanted {
-		m.degradedTransitions.Add(1)
+	m.degraded.Store(0)
+}
+
+func (m *MetricsState) ObserveSubscriberError(stage SubscriberErrorStage) {
+	if m == nil || stage >= SubscriberErrorStageCount {
+		return
 	}
+	m.subscriberErrors[stage].Add(1)
+}
+
+func (m *MetricsState) ObservePostCommitError(operation Operation) {
+	if m == nil || operation >= OperationCount {
+		return
+	}
+	m.postCommitErrors[operation].Add(1)
 }
 
 func (m *MetricsState) ObserveRecoveryAttempt() {
@@ -432,12 +467,6 @@ func (m *MetricsState) SetPendingFlush(value bool) {
 		return
 	}
 	m.pendingFlush.Store(0)
-}
-
-func (m *MetricsState) ObservePostCommitError() {
-	if m != nil {
-		m.postCommitErrors.Add(1)
-	}
 }
 
 func (m *MetricsState) ObserveL1MutationError() {
@@ -498,9 +527,14 @@ func (m *MetricsState) Snapshot() Snapshot {
 			}
 		}
 	}
+	for i := range m.subscriberErrors {
+		snapshot.SubscriberErrors[i] = m.subscriberErrors[i].Load()
+	}
 	snapshot.PendingInvalidations = m.pendingInvalidations.Load()
 	snapshot.PendingFlush = m.pendingFlush.Load() != 0
-	snapshot.PostCommitErrors = m.postCommitErrors.Load()
+	for i := range m.postCommitErrors {
+		snapshot.PostCommitErrors[i] = m.postCommitErrors[i].Load()
+	}
 	snapshot.L1MutationErrors = m.l1MutationErrors.Load()
 	for i := range m.l1FlushFallbacks {
 		snapshot.L1FlushFallbacks[i] = m.l1FlushFallbacks[i].Load()
