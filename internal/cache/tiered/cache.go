@@ -9,6 +9,7 @@ import (
 
 	cachecontract "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache"
 	cacheinvalidation "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/invalidation"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 // TieredCache uses Redis as the authoritative store and MemoryCache as a
@@ -19,6 +20,7 @@ type TieredCache struct {
 	l2 cachecontract.Cache
 
 	recoveryInterval time.Duration
+	metrics          *observability.MetricsState
 
 	healthState atomic.Uint32
 	stateErrMu  sync.RWMutex
@@ -88,6 +90,7 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 		l1:                   l1,
 		l2:                   l2,
 		recoveryInterval:     config.RecoveryInterval,
+		metrics:              config.Metrics,
 		recoveryWake:         make(chan struct{}, 1),
 		recoveryStop:         make(chan struct{}),
 		recoveryDone:         make(chan struct{}),
@@ -98,6 +101,7 @@ func newTieredCache(config Config, l1, l2 cachecontract.Cache, bus cacheinvalida
 	}
 	if bus == nil {
 		c.invalidationReady.Store(true)
+		c.metrics.SetInvalidationReady(true)
 		close(c.invalidationDone)
 	} else {
 		ctx, cancel := context.WithCancel(context.Background())

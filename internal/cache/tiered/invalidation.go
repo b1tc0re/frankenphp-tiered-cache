@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cacheinvalidation "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/invalidation"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 )
 
 const invalidationOriginSize = 16
@@ -26,12 +27,18 @@ func (c *TieredCache) publishKeyInvalidation(key string) error {
 		return nil
 	}
 
-	return c.invalidationBus.Publish(context.Background(), cacheinvalidation.Event{
+	err := c.invalidationBus.Publish(context.Background(), cacheinvalidation.Event{
 		Version: cacheinvalidation.ProtocolVersion,
 		Type:    cacheinvalidation.EventTypeInvalidate,
 		Key:     key,
 		Origin:  c.invalidationOrigin,
 	})
+	result := observability.InvalidationSuccess
+	if err != nil {
+		result = observability.InvalidationError
+	}
+	c.metrics.ObserveInvalidation(observability.InvalidationPublished, observability.InvalidationKey, result)
+	return err
 }
 
 func (c *TieredCache) publishFlushInvalidation() error {
@@ -39,11 +46,17 @@ func (c *TieredCache) publishFlushInvalidation() error {
 		return nil
 	}
 
-	return c.invalidationBus.Publish(context.Background(), cacheinvalidation.Event{
+	err := c.invalidationBus.Publish(context.Background(), cacheinvalidation.Event{
 		Version: cacheinvalidation.ProtocolVersion,
 		Type:    cacheinvalidation.EventTypeFlush,
 		Origin:  c.invalidationOrigin,
 	})
+	result := observability.InvalidationSuccess
+	if err != nil {
+		result = observability.InvalidationError
+	}
+	c.metrics.ObserveInvalidation(observability.InvalidationPublished, observability.InvalidationFlush, result)
+	return err
 }
 
 func (c *TieredCache) markPendingInvalidation(key string) {
@@ -54,6 +67,7 @@ func (c *TieredCache) markPendingInvalidation(key string) {
 	c.pendingMu.Lock()
 	if !c.pendingFlush {
 		c.pendingInvalidations[key] = struct{}{}
+		c.metrics.SetPendingInvalidations(uint64(len(c.pendingInvalidations)))
 	}
 	c.pendingMu.Unlock()
 }
@@ -66,6 +80,8 @@ func (c *TieredCache) markPendingFlush() {
 	c.pendingMu.Lock()
 	c.pendingFlush = true
 	clear(c.pendingInvalidations)
+	c.metrics.SetPendingInvalidations(0)
+	c.metrics.SetPendingFlush(true)
 	c.pendingMu.Unlock()
 }
 
@@ -82,6 +98,7 @@ func (c *TieredCache) recoverPendingInvalidations() bool {
 			return false
 		}
 		c.pendingFlush = false
+		c.metrics.SetPendingFlush(false)
 		return true
 	}
 
@@ -90,6 +107,7 @@ func (c *TieredCache) recoverPendingInvalidations() bool {
 			return false
 		}
 		delete(c.pendingInvalidations, key)
+		c.metrics.SetPendingInvalidations(uint64(len(c.pendingInvalidations)))
 	}
 	return true
 }
@@ -114,12 +132,14 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 			return
 		}
 		c.invalidationReady.Store(false)
+		c.metrics.SetInvalidationReady(false)
 
 		subscription, err := c.invalidationBus.Subscribe(ctx)
 		if err != nil {
 			if ctx.Err() != nil || c.isClosed() {
 				return
 			}
+			c.metrics.ObserveSubscriberError(observability.SubscriberErrorSubscribe)
 			c.degradeAndFlush(err)
 			if !waitForRetry(ctx, c.recoveryInterval) {
 				return
@@ -139,15 +159,18 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 			continue
 		}
 		c.invalidationReady.Store(true)
+		c.metrics.SetInvalidationReady(true)
 
 		for {
 			event, receiveErr := subscription.Receive(ctx)
 			if receiveErr != nil {
 				_ = subscription.Close()
 				c.invalidationReady.Store(false)
+				c.metrics.SetInvalidationReady(false)
 				if ctx.Err() != nil || c.isClosed() {
 					return
 				}
+				c.metrics.ObserveSubscriberError(observability.SubscriberErrorReceive)
 				c.degradeAndFlush(receiveErr)
 				break
 			}
@@ -155,9 +178,11 @@ func (c *TieredCache) runInvalidationSubscriber(ctx context.Context) {
 			if err := c.applyInvalidation(event); err != nil {
 				_ = subscription.Close()
 				c.invalidationReady.Store(false)
+				c.metrics.SetInvalidationReady(false)
 				if ctx.Err() != nil || c.isClosed() {
 					return
 				}
+				c.metrics.ObserveSubscriberError(observability.SubscriberErrorApply)
 				c.degradeAndFlush(err)
 				break
 			}
@@ -194,7 +219,12 @@ func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
 	if err := event.Validate(); err != nil {
 		return err
 	}
+	typ := observability.InvalidationKey
+	if event.Type == cacheinvalidation.EventTypeFlush {
+		typ = observability.InvalidationFlush
+	}
 	if event.Origin == c.invalidationOrigin {
+		c.metrics.ObserveInvalidation(observability.InvalidationReceived, typ, observability.InvalidationIgnoredSelf)
 		return nil
 	}
 
@@ -207,8 +237,18 @@ func (c *TieredCache) applyInvalidation(event cacheinvalidation.Event) error {
 	c.mutationVersion.Add(1)
 	if event.Type == cacheinvalidation.EventTypeFlush {
 		_, err := flushL1(c.l1)
+		result := observability.InvalidationSuccess
+		if err != nil {
+			result = observability.InvalidationError
+		}
+		c.metrics.ObserveInvalidation(observability.InvalidationReceived, typ, result)
 		return err
 	}
 	_, err := c.l1.Forget(event.Key)
+	result := observability.InvalidationSuccess
+	if err != nil {
+		result = observability.InvalidationError
+	}
+	c.metrics.ObserveInvalidation(observability.InvalidationReceived, typ, result)
 	return err
 }

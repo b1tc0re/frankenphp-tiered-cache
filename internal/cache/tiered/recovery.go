@@ -1,6 +1,10 @@
 package tiered
 
-import "time"
+import (
+	"time"
+
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
+)
 
 const recoveryProbeKey = "\x00frankenphp-tiered-cache/recovery-probe"
 
@@ -11,11 +15,17 @@ func (c *TieredCache) tryRecovery() {
 	if c.invalidationBus != nil && !c.invalidationReady.Load() {
 		return
 	}
+	c.metrics.ObserveRecoveryAttempt()
 
+	started := time.Now()
 	if _, _, err := c.l2.Get(recoveryProbeKey); err != nil {
+		c.observeL2(observability.OperationRecoveryProbe, started, err)
+		c.metrics.ObserveRecoveryResult(false)
 		return
 	}
+	c.observeL2(observability.OperationRecoveryProbe, started, nil)
 	if !c.recoverPendingInvalidations() {
+		c.metrics.ObserveRecoveryResult(false)
 		return
 	}
 
@@ -42,9 +52,12 @@ func (c *TieredCache) tryRecovery() {
 	_, flushErr := flushL1(c.l1)
 	c.mutationMu.Unlock()
 	if flushErr != nil {
+		c.metrics.ObserveRecoveryResult(false)
 		return
 	}
-	c.enterHealthy(expectedEpoch)
+	if c.enterHealthy(expectedEpoch) {
+		c.metrics.ObserveRecoveryResult(true)
+	}
 }
 
 func (c *TieredCache) runRecovery() {

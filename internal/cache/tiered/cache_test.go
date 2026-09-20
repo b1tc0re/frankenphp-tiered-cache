@@ -840,6 +840,7 @@ type fakeCache struct {
 	setStarted      chan struct{}
 	releaseSet      chan struct{}
 	setHook         func()
+	getHook         func()
 	getCalls        int
 	getManyCalls    int
 	getManyKeysSeen []string
@@ -873,6 +874,7 @@ func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 	started := f.getStarted
 	release := f.releaseGet
 	delay := f.getDelay
+	hook := f.getHook
 	f.mu.Unlock()
 
 	if started != nil {
@@ -886,6 +888,9 @@ func (f *fakeCache) Get(key string) ([]byte, time.Duration, error) {
 	}
 	if delay > 0 {
 		time.Sleep(delay)
+	}
+	if hook != nil {
+		hook()
 	}
 	if err != nil {
 		return nil, 0, err
