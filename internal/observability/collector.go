@@ -146,7 +146,7 @@ func newCollector(state *MetricsState, version string, l1Stats func() L1Snapshot
 		),
 		invalidation: prometheus.NewDesc(
 			namespace+"_invalidation_total",
-			"Redis Pub/Sub invalidation events.", []string{"direction", "type", "result"}, nil,
+			"Redis invalidation events received through Pub/Sub or client tracking.", []string{"direction", "type", "result"}, nil,
 		),
 		invalidationReady: prometheus.NewDesc(
 			namespace+"_invalidation_ready",
