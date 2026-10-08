@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/b1tc0re/frankenphp-tiered-cache/compare/v0.2.0...v0.3.0) (2026-10-08)
+
+
+### Features
+
+* **redis:** flush L1 when external cache is cleared ([73b7af2](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/73b7af23710b296d712913006b1b0dc845c1fc2f))
+* **redis:** invalidate L1 after external Redis clears ([3302ea8](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/3302ea86489b7588abb71abbb70ec064c917b656))
+
+
+### Bug Fixes
+
+* **redis:** honor tracking probe context deadlines ([0d853c1](https://github.com/b1tc0re/frankenphp-tiered-cache/commit/0d853c184e009599849d4bbae54788c468b490ae))
+
 ## [0.2.0](https://github.com/b1tc0re/frankenphp-tiered-cache/compare/v0.1.0...v0.2.0) (2026-09-20)
 
 
