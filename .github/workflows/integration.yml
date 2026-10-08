@@ -21,7 +21,6 @@ jobs:
     env:
       COMPOSE_PROJECT: frankenphp-tiered-cache-ci
       IMAGE: frankenphp-tiered-cache:ci
-      REDIS_ADDR: 127.0.0.1:6379
 
     steps:
       - name: Checkout
@@ -42,8 +41,10 @@ jobs:
             exit 1
           fi
 
-      - name: Run Go Redis integration test
-        run: go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+      - name: Run Go Redis integration tests
+        run: |
+          redis_addr="$(docker compose -p "$COMPOSE_PROJECT" -f compose.yaml port redis 6379)"
+          REDIS_ADDR="$redis_addr" go test -count=1 -run '^TestTieredCache.*Integration$' ./internal/cache/tiered
 
       - name: Build FrankenPHP image
         run: |

@@ -28,6 +28,5 @@ coverage.html
 .DS_Store
 Thumbs.db
 
-# Go tools and cache
-.tools
-.cache
+# Local tools, caches, and generated reports
+/.build/
