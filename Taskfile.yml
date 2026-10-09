@@ -127,7 +127,8 @@ tasks:
 
         run_quiet docker compose -p '{{.COMPOSE_PROJECT}}' up -d --wait redis
         run_quiet docker build --quiet --tag '{{.IMAGE}}' .
-        REDIS_ADDR=127.0.0.1:6379 go test -count=1 -run '^TestTieredCacheRedisPubSubIntegration$' ./internal/cache/tiered
+        redis_addr="$(docker compose -p '{{.COMPOSE_PROJECT}}' port redis 6379)"
+        REDIS_ADDR="$redis_addr" go test -count=1 -run '^TestTieredCache.*Integration$' ./internal/cache/tiered
         docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/smoke.php
         docker run --rm --network '{{.REDIS_NETWORK}}' --env FRANKEN_CACHE_REDIS_ADDR=redis:6379 --entrypoint frankenphp '{{.IMAGE}}' php-cli /opt/frankenphp-tiered-cache/tests/memory.php
         IMAGE='{{.IMAGE}}' REDIS_NETWORK='{{.REDIS_NETWORK}}' bash tests/metrics.sh
