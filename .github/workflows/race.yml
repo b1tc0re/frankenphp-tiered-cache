@@ -28,5 +28,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run race tests
-        run: go test -race ./internal/...
+      - name: Run race tests with coverage
+        run: >
+          go test -race
+          -coverprofile=coverage.out
+          -covermode=atomic
+          ./internal/...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          disable_search: true
+          fail_ci_if_error: true
