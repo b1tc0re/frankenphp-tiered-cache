@@ -1,4 +1,8 @@
 # FrankenPHP Tiered Cache
+[![Software License](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)](LICENSE)
+[![Go Coverage](https://codecov.io/gh/b1tc0re/frankenphp-tiered-cache/branch/main/graph/badge.svg)](https://codecov.io/gh/b1tc0re/frankenphp-tiered-cache)
+[![Documentation](https://img.shields.io/badge/docs-VitePress-646cff)](https://b1tc0re.github.io/frankenphp-tiered-cache/)
+[![Latest Release](https://img.shields.io/github/v/release/b1tc0re/frankenphp-tiered-cache)](https://github.com/b1tc0re/frankenphp-tiered-cache/releases/latest)
 
 Go-модуль и PHP-расширение для FrankenPHP. `TieredCache` хранит общий источник
 данных в Redis, а `MemoryCache` использует память каждого процесса как быстрый L1.

@@ -10,6 +10,8 @@ title: Развёртывание
 версию модуля на release tag или commit, а не на плавающую ветку.
 
 ```dockerfile
+ARG FRANKENPHP_VERSION=1.12.7
+ARG PHP_VERSION=8.4-bookworm
 ARG FRANKEN_CACHE_VERSION=<release-tag-or-commit>
 
 FROM dunglas/frankenphp:${FRANKENPHP_VERSION}-builder-php${PHP_VERSION} AS upstream

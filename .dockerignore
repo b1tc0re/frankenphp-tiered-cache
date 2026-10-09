@@ -10,3 +10,4 @@ graphify-out
 *.test
 coverage.out
 coverage.html
+docs/
