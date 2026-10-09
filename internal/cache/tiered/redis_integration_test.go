@@ -161,36 +161,40 @@ func TestTieredCacheExternalRedisFlushIntegration(t *testing.T) {
 	})
 
 	const key = "external-flush-key"
-	if ok, err := cacheA.Set(key, []byte("cached-before-flush"), time.Minute); err != nil || !ok {
-		t.Fatalf("Set() = (%t, %v), want (true, nil)", ok, err)
-	}
-	if value, _, err := cacheB.Get(key); err != nil || string(value) != "cached-before-flush" {
-		t.Fatalf("peer Get() = (%q, %v), want cached value", value, err)
-	}
-	for name, l1 := range map[string]*memory.MemoryCache{"A": l1A, "B": l1B} {
-		value, _, err := l1.Get(key)
-		if err != nil || string(value) != "cached-before-flush" {
-			t.Fatalf("L1 %s before external flush = (%q, %v), want cached value", name, value, err)
-		}
-	}
-
 	externalClient := goredis.NewClient(&goredis.Options{Addr: addr})
 	t.Cleanup(func() { _ = externalClient.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := externalClient.FlushDB(ctx).Err(); err != nil {
-		t.Fatalf("external Redis FlushDB() error = %v", err)
-	}
+	for flushNumber := 1; flushNumber <= 2; flushNumber++ {
+		want := fmt.Sprintf("cached-before-flush-%d", flushNumber)
+		if ok, err := cacheA.Set(key, []byte(want), time.Minute); err != nil || !ok {
+			t.Fatalf("Set() before flush %d = (%t, %v), want (true, nil)", flushNumber, ok, err)
+		}
+		if value, _, err := cacheB.Get(key); err != nil || string(value) != want {
+			t.Fatalf("peer Get() before flush %d = (%q, %v), want %q", flushNumber, value, err, want)
+		}
+		for name, l1 := range map[string]*memory.MemoryCache{"A": l1A, "B": l1B} {
+			value, _, err := l1.Get(key)
+			if err != nil || string(value) != want {
+				t.Fatalf("L1 %s before external flush %d = (%q, %v), want %q", name, flushNumber, value, err, want)
+			}
+		}
 
-	waitForRedisIntegrationCondition(t, func() bool {
-		valueA, _, errA := l1A.Get(key)
-		valueB, _, errB := l1B.Get(key)
-		return errA == nil && valueA == nil && errB == nil && valueB == nil
-	})
-	for name, cache := range map[string]*TieredCache{"A": cacheA, "B": cacheB} {
-		value, _, err := cache.Get(key)
-		if err != nil || value != nil {
-			t.Fatalf("TieredCache %s Get() after external flush = (%q, %v), want miss", name, value, err)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := externalClient.FlushDB(ctx).Err()
+		cancel()
+		if err != nil {
+			t.Fatalf("external Redis FlushDB() %d error = %v", flushNumber, err)
+		}
+
+		waitForRedisIntegrationCondition(t, func() bool {
+			valueA, _, errA := l1A.Get(key)
+			valueB, _, errB := l1B.Get(key)
+			return errA == nil && valueA == nil && errB == nil && valueB == nil
+		})
+		for name, cache := range map[string]*TieredCache{"A": cacheA, "B": cacheB} {
+			value, _, err := cache.Get(key)
+			if err != nil || value != nil {
+				t.Fatalf("TieredCache %s Get() after external flush %d = (%q, %v), want miss", name, flushNumber, value, err)
+			}
 		}
 	}
 }
