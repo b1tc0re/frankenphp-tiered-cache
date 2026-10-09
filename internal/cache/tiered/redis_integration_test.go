@@ -272,8 +272,8 @@ func TestTieredCacheTrackingCheckTimeoutIntegration(t *testing.T) {
 	const trackingCheckLimit = 2 * time.Second
 	const schedulerTolerance = time.Second
 	receiveErrorWait := trackingCheckLimit + schedulerTolerance
-	// This counter is updated as soon as Subscription.Receive returns the
-	// tracking probe error, before degradation and recovery start.
+	// This counter is updated after Subscription.Receive returns the tracking
+	// probe error and the subscription is closed, before degradation and recovery start.
 	errorReceived := waitForRedisIntegrationConditionWithin(receiveErrorWait, func() bool {
 		return metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorReceive] > receiveErrorsBeforePause
 	})
