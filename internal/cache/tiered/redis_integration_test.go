@@ -200,6 +200,83 @@ func TestTieredCacheExternalRedisFlushIntegration(t *testing.T) {
 	}
 }
 
+func TestTieredCachePrefixFlushRecreatesTrackingMarkerIntegration(t *testing.T) {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		t.Skip("set REDIS_ADDR to run the Redis integration test")
+	}
+
+	prefix := fmt.Sprintf("frankenphp-tiered-marker-flush:%d:", time.Now().UnixNano())
+	const key = "tracking-marker-key"
+	markerKey := prefix + "\x00frankenphp-tiered-cache:l1-generation"
+	metrics := new(observability.MetricsState)
+	redisConfig := redisbackend.Config{Addr: addr, KeyPrefix: prefix}
+	tieredConfig := Config{RecoveryInterval: 25 * time.Millisecond, Metrics: metrics}
+
+	externalClient := goredis.NewClient(&goredis.Options{
+		Addr:                  addr,
+		ContextTimeoutEnabled: true,
+	})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := externalClient.Del(ctx, prefix+key, markerKey).Err(); err != nil {
+			t.Errorf("delete integration keys during cleanup: %v", err)
+		}
+		cancel()
+		if err := externalClient.Close(); err != nil {
+			t.Errorf("close independent Redis client: %v", err)
+		}
+	})
+
+	cacheA, cacheB, l1A, l1B := newRedisIntegrationCachePairWithConfig(t, redisConfig, tieredConfig)
+	waitForRedisIntegrationCondition(t, func() bool {
+		return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load()
+	})
+
+	receiveErrorsBefore := metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorReceive]
+	for flushNumber := 1; flushNumber <= 2; flushNumber++ {
+		want := fmt.Sprintf("cached-before-prefix-flush-%d", flushNumber)
+		if ok, err := cacheA.Set(key, []byte(want), time.Minute); err != nil || !ok {
+			t.Fatalf("Set() before prefix flush %d = (%t, %v), want (true, nil)", flushNumber, ok, err)
+		}
+		if value, _, err := cacheB.Get(key); err != nil || string(value) != want {
+			t.Fatalf("peer Get() before prefix flush %d = (%q, %v), want %q", flushNumber, value, err, want)
+		}
+		for name, l1 := range map[string]*memory.MemoryCache{"A": l1A, "B": l1B} {
+			value, _, err := l1.Get(key)
+			if err != nil || string(value) != want {
+				t.Fatalf("L1 %s before prefix flush %d = (%q, %v), want %q", name, flushNumber, value, err, want)
+			}
+		}
+
+		if ok, err := cacheA.l2.Flush(); err != nil || !ok {
+			t.Fatalf("direct L2 prefix Flush() %d = (%t, %v), want (true, nil)", flushNumber, ok, err)
+		}
+
+		conditionReached := waitForRedisIntegrationConditionWithin(3*time.Second, func() bool {
+			if metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorReceive] != receiveErrorsBefore {
+				return true
+			}
+			markerCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			markerValue, markerErr := externalClient.Get(markerCtx, markerKey).Result()
+			cancel()
+
+			valueA, _, errA := l1A.Get(key)
+			valueB, _, errB := l1B.Get(key)
+			return markerErr == nil && markerValue == "1" &&
+				errA == nil && valueA == nil && errB == nil && valueB == nil &&
+				healthState(cacheA.healthState.Load()) == healthy &&
+				healthState(cacheB.healthState.Load()) == healthy
+		})
+		if !conditionReached {
+			t.Fatalf("prefix flush %d did not clear both L1 caches and recreate the tracking marker", flushNumber)
+		}
+		if got := metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorReceive]; got != receiveErrorsBefore {
+			t.Fatalf("tracking receive errors after prefix flush %d = %d, want %d", flushNumber, got, receiveErrorsBefore)
+		}
+	}
+}
+
 func TestTieredCacheTrackingCheckTimeoutIntegration(t *testing.T) {
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
