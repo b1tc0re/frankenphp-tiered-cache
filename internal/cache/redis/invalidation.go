@@ -63,6 +63,8 @@ func NewInvalidationBus(config Config) (*InvalidationBus, error) {
 		// Pub/Sub waits while idle; Receive uses its context for cancellation.
 		ReadTimeout:  0,
 		WriteTimeout: config.WriteTimeout,
+		// Tracking probes need their context deadlines to bound blocked reads.
+		ContextTimeoutEnabled: true,
 	})
 
 	bus := &InvalidationBus{

@@ -9,6 +9,7 @@ import (
 
 	"github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/memory"
 	redisbackend "github.com/b1tc0re/frankenphp-tiered-cache/internal/cache/redis"
+	"github.com/b1tc0re/frankenphp-tiered-cache/internal/observability"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -199,9 +200,146 @@ func TestTieredCacheExternalRedisFlushIntegration(t *testing.T) {
 	}
 }
 
+func TestTieredCacheTrackingCheckTimeoutIntegration(t *testing.T) {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		t.Skip("set REDIS_ADDR to run the Redis integration test")
+	}
+
+	metrics := new(observability.MetricsState)
+	prefix := fmt.Sprintf("frankenphp-tiered-tracking-timeout:%d:", time.Now().UnixNano())
+	redisConfig := redisbackend.Config{Addr: addr, KeyPrefix: prefix}
+	tieredConfig := Config{RecoveryInterval: 25 * time.Millisecond, Metrics: metrics}
+	cacheA, cacheB, l1A, l1B := newRedisIntegrationCachePairWithConfig(t, redisConfig, tieredConfig)
+
+	waitForRedisIntegrationCondition(t, func() bool {
+		return cacheA.invalidationReady.Load() && cacheB.invalidationReady.Load()
+	})
+
+	const key = "tracking-timeout-key"
+	const warmValue = "cached-before-redis-pause"
+	const redisPauseDuration = 5 * time.Second
+	keyInvalidationCount := func() uint64 {
+		return metrics.Snapshot().Invalidation[observability.InvalidationReceived][observability.InvalidationKey][observability.InvalidationSuccess]
+	}
+	keyInvalidationsBeforeWarm := keyInvalidationCount()
+	if ok, err := cacheA.Set(key, []byte(warmValue), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() before Redis pause = (%t, %v), want (true, nil)", ok, err)
+	}
+	if !waitForRedisIntegrationConditionWithin(3*time.Second, func() bool {
+		return keyInvalidationCount() > keyInvalidationsBeforeWarm
+	}) {
+		t.Fatal("peer did not receive the warm-up invalidation")
+	}
+	if value, _, err := cacheB.Get(key); err != nil || string(value) != warmValue {
+		t.Fatalf("peer Get() before Redis pause = (%q, %v), want %q", value, err, warmValue)
+	}
+	for name, l1 := range map[string]*memory.MemoryCache{"A": l1A, "B": l1B} {
+		value, _, err := l1.Get(key)
+		if err != nil || string(value) != warmValue {
+			t.Fatalf("L1 %s before Redis pause = (%q, %v), want %q", name, value, err, warmValue)
+		}
+	}
+
+	externalClient := goredis.NewClient(&goredis.Options{
+		Addr:                  addr,
+		ContextTimeoutEnabled: true,
+	})
+	unpauseRedis := func() error {
+		// CLIENT PAUSE ALL also queues CLIENT UNPAUSE until the pause expires.
+		ctx, cancel := context.WithTimeout(context.Background(), redisPauseDuration+2*time.Second)
+		defer cancel()
+		return externalClient.Do(ctx, "CLIENT", "UNPAUSE").Err()
+	}
+	t.Cleanup(func() {
+		if err := unpauseRedis(); err != nil {
+			t.Errorf("CLIENT UNPAUSE during cleanup: %v", err)
+		}
+		if err := externalClient.Close(); err != nil {
+			t.Errorf("close independent Redis client: %v", err)
+		}
+	})
+
+	receiveErrorsBeforePause := metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorReceive]
+	pauseCtx, cancelPause := context.WithTimeout(context.Background(), 2*time.Second)
+	pauseErr := externalClient.Do(pauseCtx, "CLIENT", "PAUSE", redisPauseDuration.Milliseconds(), "ALL").Err()
+	cancelPause()
+	if pauseErr != nil {
+		t.Fatalf("CLIENT PAUSE 5000 ALL: %v", pauseErr)
+	}
+	pauseStarted := time.Now()
+
+	const trackingCheckLimit = 2 * time.Second
+	const schedulerTolerance = time.Second
+	receiveErrorWait := trackingCheckLimit + schedulerTolerance
+	// This counter is updated as soon as Subscription.Receive returns the
+	// tracking probe error, before degradation and recovery start.
+	errorReceived := waitForRedisIntegrationConditionWithin(receiveErrorWait, func() bool {
+		return metrics.Snapshot().SubscriberErrors[observability.SubscriberErrorReceive] > receiveErrorsBeforePause
+	})
+	if !errorReceived {
+		t.Fatalf("tracking check error was not received within %s while Redis was paused", receiveErrorWait)
+	}
+	checkErrorElapsed := time.Since(pauseStarted)
+	if minElapsed := trackingCheckLimit - 500*time.Millisecond; checkErrorElapsed < minElapsed || checkErrorElapsed > receiveErrorWait {
+		t.Fatalf("tracking check error arrived after %s, want between %s and %s", checkErrorElapsed, minElapsed, receiveErrorWait)
+	}
+
+	const degradedTransitionWait = time.Second
+	if !waitForRedisIntegrationConditionWithin(degradedTransitionWait, func() bool {
+		valueA, _, errA := l1A.Get(key)
+		valueB, _, errB := l1B.Get(key)
+		return healthState(cacheA.healthState.Load()) == degraded &&
+			healthState(cacheB.healthState.Load()) == degraded &&
+			errA == nil && valueA == nil && errB == nil && valueB == nil
+	}) {
+		t.Fatalf("TieredCache instances did not degrade and clear L1 within %s", degradedTransitionWait)
+	}
+
+	if err := unpauseRedis(); err != nil {
+		t.Fatalf("CLIENT UNPAUSE after tracking check: %v", err)
+	}
+
+	const recoveryWait = 10 * time.Second
+	if !waitForRedisIntegrationConditionWithin(recoveryWait, func() bool {
+		return cacheA.invalidationReady.Load() &&
+			cacheB.invalidationReady.Load() &&
+			healthState(cacheA.healthState.Load()) == healthy &&
+			healthState(cacheB.healthState.Load()) == healthy
+	}) {
+		t.Fatalf("TieredCache subscriptions did not recover within %s", recoveryWait)
+	}
+
+	for name, cache := range map[string]*TieredCache{"A": cacheA, "B": cacheB} {
+		value, _, err := cache.Get(key)
+		if err != nil || string(value) != warmValue {
+			t.Fatalf("TieredCache %s Get() after recovery = (%q, %v), want %q", name, value, err, warmValue)
+		}
+	}
+	const recoveredValue = "cache-after-redis-pause"
+	if ok, err := cacheA.Set(key, []byte(recoveredValue), time.Minute); err != nil || !ok {
+		t.Fatalf("Set() after recovery = (%t, %v), want (true, nil)", ok, err)
+	}
+	waitForRedisIntegrationCondition(t, func() bool {
+		value, _, err := l1B.Get(key)
+		return err == nil && value == nil
+	})
+	if value, _, err := cacheB.Get(key); err != nil || string(value) != recoveredValue {
+		t.Fatalf("peer Get() after subscription recovery = (%q, %v), want %q", value, err, recoveredValue)
+	}
+}
+
 func newRedisIntegrationCachePair(
 	t *testing.T,
 	redisConfig redisbackend.Config,
+) (*TieredCache, *TieredCache, *memory.MemoryCache, *memory.MemoryCache) {
+	return newRedisIntegrationCachePairWithConfig(t, redisConfig, Config{RecoveryInterval: 25 * time.Millisecond})
+}
+
+func newRedisIntegrationCachePairWithConfig(
+	t *testing.T,
+	redisConfig redisbackend.Config,
+	tieredConfig Config,
 ) (*TieredCache, *TieredCache, *memory.MemoryCache, *memory.MemoryCache) {
 	t.Helper()
 
@@ -245,7 +383,6 @@ func newRedisIntegrationCachePair(
 		t.Fatalf("invalidation bus B: %v", err)
 	}
 
-	tieredConfig := Config{RecoveryInterval: 25 * time.Millisecond}
 	cacheA, err := NewWithInvalidation(tieredConfig, l1A, l2A, busA)
 	if err != nil {
 		_ = busB.Close()
@@ -287,12 +424,18 @@ func warmCacheFromL2Key(t *testing.T, cache *TieredCache, key, want string) {
 
 func waitForRedisIntegrationCondition(t *testing.T, condition func() bool) {
 	t.Helper()
+	if !waitForRedisIntegrationConditionWithin(3*time.Second, condition) {
+		t.Fatal("Redis integration condition was not satisfied")
+	}
+}
 
-	deadline := time.Now().Add(3 * time.Second)
+func waitForRedisIntegrationConditionWithin(timeout time.Duration, condition func() bool) bool {
+	deadline := time.Now().Add(timeout)
 	for !condition() {
 		if time.Now().After(deadline) {
-			t.Fatal("Redis integration condition was not satisfied")
+			return false
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	return true
 }
