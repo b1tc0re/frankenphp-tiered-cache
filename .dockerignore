@@ -1,12 +1,10 @@
 .git
 .github
 .agents
-.cache
+/.build/
 .codex
-.tools
 .idea
 .vscode
-bench
 graphify-out
 *.out
 *.test
